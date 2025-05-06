@@ -6,14 +6,10 @@ TORCHINDUCTOR_CACHE_DIR: inductor cache location
 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM: enable autotuned Triton backend
 """
 import torch
-import torch.testing
 from torch.testing import assert_close, make_tensor
 
-import torch._inductor.config
-torch._inductor.config.max_autotune_gemm = True
-
-# comment the line to disable bmm fusion
-from monkeypatch import fuse_bmm
+# comment the line to disable the patch
+from monkeypatch import fused_bmm_template
 
 DEVICE = torch.device("cuda:0")
 BATCH = 2

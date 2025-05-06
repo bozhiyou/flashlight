@@ -1,8 +1,8 @@
 from . import _monkey as monkey
 
 import functools
-from typing import Tuple, List, Set, Dict
 from collections import deque
+from typing import List, Set, Dict
 
 import torch
 import torch.fx
@@ -18,6 +18,9 @@ from torch._inductor.kernel.mm_common import acc_type
 
 import torch._inductor.config
 torch._inductor.config.pattern_matcher = True
+torch._inductor.config.max_autotune_gemm = True
+torch._inductor.config.max_autotune_gemm_backends.replace("ATEN",'')  # disable external aten kernel for test purposes
+
 
 BMM_FUSION_PASS = PatternMatcherPass(pass_name="bmm_fusion_pass")
 pass_patterns.append(BMM_FUSION_PASS)
@@ -89,7 +92,7 @@ def bmm_fusion_matcher(match: Match, mat1: torch.fx.Node, mat2: torch.fx.Node) -
 
     for f_node in outer_mm.all_input_nodes:
         if f_node in subgraph_node_set:
-            break  # bozhi: two f_node case?
+            break  # @bozhiyou: two f_node case?
 
     # check inner_mm's inputs and f_node's outputs
     # if not (len(inner_mm.all_input_nodes) == 2 and len(f_node.users) == 1):
