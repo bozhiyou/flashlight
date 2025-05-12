@@ -246,31 +246,34 @@ def attention_pytorch(
 
 @torch.compile
 def attention_pytorch_alibi(
-        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, score_mod=None,
         attn_mask=None, dropout_p=0.0, is_causal: bool=False, scale=None, enable_gqa=False) -> torch.Tensor:
+        
     
     # Scale factor calculation
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
 
-    # ALiBi slope generation (compiler-friendly)
-    Hq = query.size(-3)  # number of heads in query
-    device, dtype = query.device, query.dtype
+    # # ALiBi slope generation (compiler-friendly)
+    # Hq = query.size(-3)  # number of heads in query
+    # device, dtype = query.device, query.dtype
     
-    # Generating the slope factor based on head index and number of heads (same as in flex_attention)
-    slopes = torch.pow(2, torch.arange(-8, -8*(Hq+1), -8, device=device) / Hq).to(dtype)
+    # # Generating the slope factor based on head index and number of heads (same as in flex_attention)
+    # slopes = torch.pow(2, torch.arange(-8, -8*(Hq+1), -8, device=device) / Hq).to(dtype)
 
-    # Attention computation (query @ key) scaled by scale_factor
+    # # Attention computation (query @ key) scaled by scale_factor
     attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
 
-    # ALiBi bias injection
-    L, S = query.size(-2), key.size(-2)
-    q_idx = torch.arange(L, device=device).view(-1, 1).to(dtype)
-    k_idx = torch.arange(S, device=device).view(1, -1).to(dtype)
-    rel_dist = (q_idx - k_idx)  # [L, S]
+    # # ALiBi bias injection
+    # L, S = query.size(-2), key.size(-2)
+    # q_idx = torch.arange(L, device=device).view(-1, 1).to(dtype)
+    # k_idx = torch.arange(S, device=device).view(1, -1).to(dtype)
+    # rel_dist = (q_idx - k_idx)  # [L, S]
 
     # Head-specific bias addition as in flex_attention
-    attn_weight = attn_weight + (slopes.view(-1, 1, 1) * rel_dist).unsqueeze(0)
+    # attn_weight = attn_weight + (slopes.view(-1, 1, 1) * rel_dist).unsqueeze(0)
+    N, Hq, L, E = query.shape
 
+    attn_weight = attn_weight + score_mod(attn_weight, query, key)
     
     attn_weight = torch.softmax(attn_weight, dim=-1)
 
@@ -280,11 +283,13 @@ def attention_pytorch_alibi(
     # Matrix multiply with value tensor
     return attn_weight @ value
 
+
 @torch.compile
 def attention_softcapped(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_mod: None,
     attn_mask=None,
     dropout_p=0.0,
     is_causal: bool=False,
@@ -321,8 +326,7 @@ def attention_softcapped(
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
 
     # Apply soft-capping: cap * tanh(score / cap)
-    attn_weight = softcap_threshold * torch.tanh(attn_weight / softcap_threshold)
-
+    attn_weight = score_mod(attn_weight,  N, Hq, query, key)
 
     # Softmax and dropout
     attn_weight = torch.softmax(attn_weight, dim=-1)
@@ -429,6 +433,7 @@ def attention_pytorch_causal(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    attn_mask: torch.Tensor = None,
     dropout_p: float = 0.0,
     scale: float = None,
 ) -> torch.Tensor:
@@ -450,14 +455,15 @@ def attention_pytorch_causal(
     # Compute raw attention scores
     attn_scores = query @ key.transpose(-2, -1) * scale
 
-    # Build causal mask using broadcasting and indexing
-    q_idx = torch.arange(L, device=query.device).view(L, 1)  # (L, 1)
-    kv_idx = torch.arange(S, device=key.device).view(1, S)   # (1, S)
-    causal_mask = q_idx >= kv_idx                            # (L, S) boolean
+    # # Build causal mask using broadcasting and indexing
+    # q_idx = torch.arange(L, device=query.device).view(L, 1)  # (L, 1)
+    # kv_idx = torch.arange(S, device=key.device).view(1, S)   # (1, S)
+    # causal_mask = q_idx >= kv_idx                            # (L, S) boolean
 
 
     # Apply causal mask: convert True/False to 0/-inf
-    attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
+    # attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
+    attn_scores = attn_scores.masked_fill(attn_mask, float("-inf"))
 
     # Apply softmax and dropout
     attn_weights = torch.softmax(attn_scores, dim=-1)
@@ -475,7 +481,7 @@ def attention_pytorch_sliding_window(
     key: torch.Tensor,
     value: torch.Tensor,
     window_size: int = 1024,
-    attn_mask=None,
+    attn_mask: torch.Tensor = None,
     dropout_p: float = 0.0,
     scale: float = None,
     enable_gqa: bool = False
@@ -491,14 +497,7 @@ def attention_pytorch_sliding_window(
     scale_factor = 1.0 / math.sqrt(D) if scale is None else scale
     attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (N, H, L, L)
 
-    # Create (L, L) mask: True where j ∉ [i - window_size, i]
-    q_idx = torch.arange(L, device=query.device).view(L, 1)
-    k_idx = torch.arange(L, device=query.device).view(1, L)
-    causal_sliding_mask = (q_idx < k_idx) | ((q_idx - k_idx) > window_size)  # shape (L, L)
-
-    # Expand to (N, H, L, L)
-    full_mask = causal_sliding_mask.unsqueeze(0).unsqueeze(0).expand(N, H, L, L)
-    attn_scores = attn_scores.masked_fill(full_mask, float('-inf'))
+    attn_scores = attn_scores.masked_fill(attn_mask, float('-inf'))
 
     # Apply softmax and dropout
     attn_weights = torch.softmax(attn_scores, dim=-1)
@@ -512,15 +511,16 @@ def attention_pytorch_prefix_lm(
     key: torch.Tensor,
     value: torch.Tensor,
     prefix_lengths: Union[int, torch.Tensor],  # scalar or [B]
+    attn_mask = None,
     dropout_p: float = 0.0,
     scale: Optional[float] = None,
     training: bool = False,
 ) -> torch.Tensor:
     B, H, S, D = query.shape
 
-    if isinstance(prefix_lengths, int):
-        prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
-    assert prefix_lengths.shape == (B,), f"Expected prefix_lengths shape [B], got {prefix_lengths.shape}"
+    # if isinstance(prefix_lengths, int):
+    #     prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
+    # assert prefix_lengths.shape == (B,), f"Expected prefix_lengths shape [B], got {prefix_lengths.shape}"
 
     # Scale factor
     scale = scale or (1.0 / math.sqrt(D))
@@ -528,19 +528,18 @@ def attention_pytorch_prefix_lm(
     # Compute attention scores: [B, H, S, S]
     attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
 
-    # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
-    q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
-    k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
-    prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+    # # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
+    # q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
+    # k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
+    # prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
 
-    max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
-    causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
+    # max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
+    # causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
 
-    attn_scores = attn_scores.masked_fill(causal_prefix_mask, float("-inf"))
+    attn_scores = attn_scores.masked_fill(attn_mask, float("-inf"))
 
     # Compute softmax over attention scores
     attn_weights = torch.softmax(attn_scores, dim=-1)
-    attn_weights = torch.dropout(attn_weights, dropout_p, train=training)
 
     return attn_weights @ value  # [B, H, S, D]
 
@@ -612,6 +611,37 @@ CONFIGS = {
     "dropout_p": 0.0,
 }
 
+# dummy generate function 
+def generate_alibi_bias_pytorch(nheads): return lambda s, q, k: s - torch.arange(nheads, device="cuda").view(1, -1, 1, 1)
+
+def get_causal_mask(L: int, S: int, device: torch.device):
+    q_idx = torch.arange(L, device=device).view(L, 1)
+    kv_idx = torch.arange(S, device=device).view(1, S)
+    return (q_idx < kv_idx).to(torch.bool)  # shape: (L, S)
+
+def get_sliding_mask(query, window_size):
+    # Create (L, L) mask: True where j ∉ [i - window_size, i]
+    N, H, L, D = query.shape
+    q_idx = torch.arange(L, device=query.device).view(L, 1)
+    k_idx = torch.arange(L, device=query.device).view(1, L)
+    causal_sliding_mask = (q_idx < k_idx) | ((q_idx - k_idx) > window_size)  # shape (L, L)
+
+    # Expand to (N, H, L, L)
+    full_mask = causal_sliding_mask.unsqueeze(0).unsqueeze(0).expand(N, H, L, L)
+    return full_mask
+
+def get_prefix_lm_mask(query, prefix_lengths):
+    B, H, S, D = query.shape
+    prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
+     # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
+    q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
+    k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
+    prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+
+    max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
+    causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
+    return causal_prefix_mask
+
 # 'qkv' in name uses packed qkv input
 ATTENTION_REGISTRY = {
     "full": lambda q, k, v: attention_pytorch(
@@ -619,32 +649,31 @@ ATTENTION_REGISTRY = {
     ),
     "flex_full": lambda q, k, v: flex_attention(q, k, v, score_mod=_identity),
     "full_with_alibi": lambda q, k, v: attention_pytorch_alibi(
-        q, k, v,# dropout_p=dropout_p#, is_causal=causal
+        q, k, v, score_mod=generate_alibi_bias_pytorch(q.size(-3))# dropout_p=dropout_p#, is_causal=causal
     ),
     "flex_full_with_alibi": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_alibi_bias(q.size(-3))),
 
-    "full_with_softcap": lambda q, k, v: attention_softcapped(
-        q, k, v, softcap_threshold=30 # dropout_p=dropout_p#, is_causal=causal
+    "full_with_softcap": lambda q, k, v: attention_softcapped(q, k, v, score_mod=generate_tanh_softcap(30, approx=False)
     ),
     "flex_full_with_softcap": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=False)),
 
-    "full_with_softcap_approx": lambda q, k, v: attention_softcap_approx(
-        q, k, v, softcap_threshold=30 # dropout_p=dropout_p#, is_causal=causal
-    ),
-    "flex_full_with_softcap_approx": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=True)),
+    # "full_with_softcap_approx": lambda q, k, v: attention_softcap_approx(
+    #     q, k, v, tahn_fnc=generate_tanh_softcap(30, approx=False) # dropout_p=dropout_p#, is_causal=causal
+    # ),
+    # "flex_full_with_softcap_approx": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=True)),
 
     "full_with_causal": lambda q, k, v: attention_pytorch_causal(
-        q, k, v,# dropout_p=dropout_p#, is_causal=causal
+        q, k, v, attn_mask=get_causal_mask(q.shape[-2], k.shape[-2], "cuda")# dropout_p=dropout_p#, is_causal=causal
     ),
     "flex_full_with_causal": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
 
     "full_with_sliding_window": lambda q, k, v: attention_pytorch_sliding_window(
-        q, k, v, window_size=256, # dropout_p=dropout_p#, is_causal=causal
+        q, k, v, window_size=256, attn_mask=get_sliding_mask(q, 256), # dropout_p=dropout_p#, is_causal=causal
     ),
     "flex_full_with_sliding_window": lambda q, k, v: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
     
     "full_with_prefix_lm": lambda q, k, v: attention_pytorch_prefix_lm(
-        q, k, v, prefix_lengths=256 # dropout_p=dropout_p#, is_causal=causal
+        q, k, v, prefix_lengths=256, attn_mask=get_prefix_lm_mask(q, 256) # dropout_p=dropout_p#, is_causal=causal
     ),
     "flex_full_with_prefix_lm": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256),B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
     
