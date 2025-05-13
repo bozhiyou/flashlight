@@ -188,6 +188,10 @@ try:
 
     )
     from attn_gym.mods import generate_alibi_bias, generate_tanh_softcap
+
+    def alibi_bias(h, q_len, kv_len):
+        return torch.exp2(-((torch.arange(h, dtype=dtype) + 1) * 8.0 / h))[:, None, None] * (torch.arange(kv_len, dtype=dtype)[None, :] - torch.arange(q_len, dtype=dtype)[:, None])
+    def generate_alibi_bias_pytorch(nheads): return lambda q, k: alibi_bias(nheads, q, k)
 except ImportError:
     print("IMPORT ERROR")
     def causal_mask(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
@@ -270,10 +274,10 @@ def attention_pytorch_alibi(
 
     # Head-specific bias addition as in flex_attention
     # attn_weight = attn_weight + (slopes.view(-1, 1, 1) * rel_dist).unsqueeze(0)
-    N, Hq, L, E = query.shape
+    # N, Hq, L, E = query.shape
 
-    attn_weight = attn_weight + score_mod(attn_weight, query, key)
-    
+    attn_weight = attn_weight + score_mod(attn_weight.size(-2), attn_weight.size(-1))
+
     attn_weight = torch.softmax(attn_weight, dim=-1)
 
     # Cast to value's dtype before matmul (ensuring dtype match)
@@ -610,8 +614,6 @@ CONFIGS = {
     "dropout_p": 0.0,
 }
 
-# dummy generate function 
-def generate_alibi_bias_pytorch(nheads): return lambda s, q, k: s - torch.arange(nheads, device="cuda").view(1, -1, 1, 1)
 
 def get_causal_mask(L: int, S: int, device: torch.device):
     q_idx = torch.arange(L, device=device).view(L, 1)
