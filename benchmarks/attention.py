@@ -11,6 +11,8 @@ from functools import lru_cache, partial
 import flash_attn.utils
 import flash_attn.utils.benchmark
 from typing import Optional, List, Literal
+import torch._dynamo
+torch._dynamo.config.cache_size_limit = 65536
 
 ###########
 # formatting
@@ -82,16 +84,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device=device_type)
 
-    # Estimate the runtime of the function
-    # start_event = di.Event(enable_timing=True)
-    # end_event = di.Event(enable_timing=True)
-    # start_event.record()
-    # for _ in range(5):
-    #     cache.zero_()
-    #     fn()
-    # end_event.record()
-    # di.synchronize()
-    # estimate_ms = start_event.elapsed_time(end_event) / 5
+
 
     # compute number of warmup and repeat
     n_warmup = max(2, int(warmup // 100))  # max(1, int(warmup / estimate_ms))
@@ -170,6 +163,14 @@ except ImportError:
 
 try:
     from attn_gym.masks import causal_mask
+    from attn_gym.masks.document_mask import length_to_offsets
+    from attn_gym.masks import (
+        generate_sliding_window,
+        generate_prefix_lm_mask,
+        generate_doc_mask_mod,
+
+    )
+    from attn_gym.mods import generate_alibi_bias, generate_tanh_softcap
     # Flex attention related mask and modification functions
     from torch.nn.attention.flex_attention import (
         _DEFAULT_SPARSE_BLOCK_SIZE,
@@ -189,13 +190,13 @@ try:
     
     flex_attention = torch.compile(flex_attention, dynamic=False)
 except ImportError:
+    print("IMPORT ERROR")
     def causal_mask(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
     def generate_sliding_window(window_size): return lambda b, h, q, k: torch.tril(torch.ones(q, k), diagonal=window_size)
     def generate_prefix_lm_mask(prefix_length): return lambda b, h, q, k: torch.tril(torch.ones(q, k), diagonal=prefix_length)
     def generate_doc_mask_mod(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
     def generate_alibi_bias(nheads): return lambda s, a, q, k: s - torch.arange(nheads, device="cuda").view(1, -1, 1, 1)
     def generate_tanh_softcap(cap, approx): return lambda s, a, q, k: cap * torch.tanh(s / cap)
-
 
 
 torch.set_default_device("cuda")
@@ -205,23 +206,8 @@ dtype = torch.float16
 
 def apply_patch():
     import monkeypatch.dependent_reduction_fusion
-# apply_patch()
+apply_patch()
 
-# # Mask modifications
-# MASK_MODS = {
-#     "causal": causal_mask,
-#     "sliding_window": generate_sliding_window(window_size=1024),
-#     "prefix_lm": generate_prefix_lm_mask(prefix_length=1024),
-#     "document": generate_doc_mask_mod,
-# }
-# block_mask = create_block_mask(mask_mod, 1, 1, seqlen, seqlen, device=device) if mask_mod else None
-
-# # Score modifications
-# SCORE_MODS = {
-#     "alibi": generate_alibi_bias(16),
-#     "softcap": generate_tanh_softcap(30, approx=False),
-#     "softcap_approx": generate_tanh_softcap(30, approx=True),
-# }
 
 from baselines import multihead_diffattn
 
@@ -250,22 +236,6 @@ def attention_pytorch(
     """
     # L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    # attn_bias = torch.zeros(L, S, dtype=query.dtype)
-    # if is_causal:
-    #     assert attn_mask is None
-    #     temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-    #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-    #     attn_bias.to(query.dtype)
-
-    # if attn_mask is not None:
-    #     if attn_mask.dtype == torch.bool:
-    #         attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-    #     else:
-    #         attn_bias += attn_mask
-
-    # if enable_gqa:
-    #     key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
-    #     value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
 
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
     # attn_weight += attn_bias
@@ -274,38 +244,359 @@ def attention_pytorch(
     return attn_weight @ value
 
 
+@torch.compile
+def attention_pytorch_alibi(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, score_mod=None,
+        attn_mask=None, dropout_p=0.0, is_causal: bool=False, scale=None, enable_gqa=False) -> torch.Tensor:
+        
+    
+    # Scale factor calculation
+    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
 
-# def _make_bench():
-#     ref_func = lambda: attention_pytorch(qkv, dropout_p, causal)
-#     if impl == "flex_attention":
-#         if flex_attention is None or causal_mask is None or create_block_mask is None:
-#             return
+    # # ALiBi slope generation (compiler-friendly)
+    # Hq = query.size(-3)  # number of heads in query
+    # device, dtype = query.device, query.dtype
+    
+    # # Generating the slope factor based on head index and number of heads (same as in flex_attention)
+    # slopes = torch.pow(2, torch.arange(-8, -8*(Hq+1), -8, device=device) / Hq).to(dtype)
 
-#         flex_attn_func = lambda: flex_attention(qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], block_mask=block_mask)
-#     elif impl == "flash_attention":
-#         if flash_attn_qkvpacked_func is None:
-#             return
-#         flash_attn_func = lambda: flash_attn_qkvpacked_func(qkv, dropout_p, causal=causal)
-#     elif impl == "pytorch":
-#         pytorch_attn_func = lambda: attention_pytorch(qkv, dropout_p, causal)
-#         ref_func = pytorch_attn_func
-#     elif impl == "triton":
-#         if attention_triton is None:
-#             return
-#         q, k, v = qkv.unbind(dim=2)
-#         triton_attn_func = lambda: attention_triton(q, k, v, causal, headdim ** (-0.5))
-#     elif impl == "xformers_cutlass":
-#         if xops is None:
-#             return
-#         q, k, v = [rearrange(t, 'b s h d -> b s h d') for t in qkv.unbind(dim=2)]
-#         attn_bias = xops.LowerTriangularMask() if causal else None
-#         xformers_attn_func = lambda: xops.memory_efficient_attention(q, k, v, attn_bias=attn_bias, op=(xops.fmha.cutlass.FwOp, xops.fmha.cutlass.BwOp))
-#     elif impl == "xformers_flash":
-#         if xops is None:
-#             return
-#         q, k, v = [rearrange(t, 'b s h d -> b s h d') for t in qkv.unbind(dim=2)]
-#         attn_bias = xops.LowerTriangularMask() if causal else None
-#         xformers_attn_func = lambda: xops.memory_efficient_attention(q, k, v, attn_bias=attn_bias, op=(xops.fmha.flash.FwOp, xops.fmha.flash.BwOp))
+    # # Attention computation (query @ key) scaled by scale_factor
+    attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
+
+    # # ALiBi bias injection
+    # L, S = query.size(-2), key.size(-2)
+    # q_idx = torch.arange(L, device=device).view(-1, 1).to(dtype)
+    # k_idx = torch.arange(S, device=device).view(1, -1).to(dtype)
+    # rel_dist = (q_idx - k_idx)  # [L, S]
+
+    # Head-specific bias addition as in flex_attention
+    # attn_weight = attn_weight + (slopes.view(-1, 1, 1) * rel_dist).unsqueeze(0)
+    N, Hq, L, E = query.shape
+
+    attn_weight = attn_weight + score_mod(attn_weight, query, key)
+    
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+
+    # Cast to value's dtype before matmul (ensuring dtype match)
+    # attn_weight = attn_weight.to(value.dtype)
+
+    # Matrix multiply with value tensor
+    return attn_weight @ value
+
+
+@torch.compile
+def attention_softcapped(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    score_mod: None,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal: bool=False,
+    scale=None,
+    enable_gqa: bool=False,
+    softcap_threshold: float = 30.0,
+) -> torch.Tensor:
+    r"""
+    Scaled dot-product attention with soft-capping.
+
+    Args:
+        query (Tensor): Query tensor; shape :math:`(N, ..., Hq, L, E)`.
+        key (Tensor): Key tensor; shape :math:`(N, ..., H, S, E)`.
+        value (Tensor): Value tensor; shape :math:`(N, ..., H, S, Ev)`.
+        attn_mask (optional Tensor): Broadcastable to :math:`(N,..., L, S)`.
+            If bool, True means attend; if float, added to attention scores.
+        dropout_p (float): Dropout probability.
+        is_causal (bool): If True, apply lower-triangular causal mask.
+        scale (optional float): Scale factor for logits (default: 1 / sqrt(E)).
+        enable_gqa (bool): If True, enable Grouped Query Attention.
+        softcap_threshold (float): Soft cap threshold; larger logits saturate to this value.
+
+    Returns:
+        Output tensor of shape :math:`(N, ..., Hq, L, Ev)`.
+    """
+    N, Hq, L, E = query.shape
+    H = key.size(-3)
+    S = key.size(-2)
+    Ev = value.size(-1)
+
+    scale_factor = 1 / math.sqrt(E) if scale is None else scale
+
+    # Scaled dot product
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+
+    # Apply soft-capping: cap * tanh(score / cap)
+    attn_weight = score_mod(attn_weight,  N, Hq, query, key)
+
+    # Softmax and dropout
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+
+    return attn_weight @ value  # (N, ..., Hq, L, Ev)
+
+@torch.compile
+def attention_softcap_approx(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask=None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    scale: float = None,
+    enable_gqa: bool = False,
+    softcap_threshold: float = 30.0,
+) -> torch.Tensor:
+    r"""
+    Scaled dot-product attention with softcap approximation.
+
+    Args:
+        query (Tensor): shape (N, ..., Hq, L, E)
+        key (Tensor): shape (N, ..., H, S, E)
+        value (Tensor): shape (N, ..., H, S, Ev)
+        attn_mask (optional Tensor): Broadcastable to (..., L, S)
+        dropout_p (float): Dropout probability.
+        is_causal (bool): If True, apply causal masking.
+        scale (float): Optional scaling factor (default = 1/sqrt(E))
+        enable_gqa (bool): Enables Grouped Query Attention (GQA).
+        softcap_threshold (float): Threshold for softcap approximation.
+
+    Returns:
+        Tensor of shape (N, ..., Hq, L, Ev)
+    """
+    N, Hq, L, E = query.shape
+    H = key.size(-3)
+    S = key.size(-2)
+
+    scale_factor = 1 / math.sqrt(E) if scale is None else scale
+
+    # Scaled dot-product attention scores
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+
+    # Softcap approximation: x / (1 + |x| / t)
+    abs_attn = attn_weight.abs()
+    attn_weight = attn_weight / (1 + attn_weight.abs() / softcap_threshold) # Corrected
+
+    # Causal masking
+    # if is_causal:
+    #     causal_mask = torch.triu(torch.ones(L, S, dtype=torch.bool, device=query.device), diagonal=1)
+    #     attn_weight = attn_weight.masked_fill(causal_mask, float('-inf'))
+
+    # Softmax normalization and dropout
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    # attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+
+    return attn_weight @ value
+
+
+# @torch.compile
+# def attention_pytorch_causal(
+#     query: torch.Tensor,
+#     key: torch.Tensor,
+#     value: torch.Tensor,
+#     attn_mask=None,
+#     dropout_p: float = 0.0,
+#     is_causal: bool = True,
+#     scale: float = None,
+#     enable_gqa: bool = False
+# ) -> torch.Tensor:
+#     r"""
+#     Args:
+#         query (Tensor): shape (N, ..., Hq, L, E)
+#         key (Tensor): shape (N, ..., H, S, E)
+#         value (Tensor): shape (N, ..., H, S, Ev)
+#         attn_mask (Tensor, optional): Broadcastable to (..., L, S). Can be bool or float.
+#         dropout_p (float): Dropout probability applied to attention weights.
+#         is_causal (bool): If True, apply causal masking (upper triangle is masked).
+#         scale (float, optional): Scaling factor for dot product.
+#         enable_gqa (bool): If True, enables Grouped Query Attention.
+        
+#     """
+
+#     N, Hq, L, E = query.shape
+#     H, S = key.size(-3), key.size(-2)
+
+#     scale_factor = 1 / math.sqrt(E) if scale is None else scale
+
+#     # Compute raw attention scores
+#     attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (N, ..., Hq, L, S)
+
+#     # Causal masking (upper triangle is masked with -inf)
+#     causal_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril()
+#     attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
+
+#     # Normalize and apply dropout
+#     attn_weights = torch.softmax(attn_scores, dim=-1)
+
+#     return attn_weights @ value
+
+@torch.compile
+def attention_pytorch_causal(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor = None,
+    dropout_p: float = 0.0,
+    scale: float = None,
+) -> torch.Tensor:
+    """
+    Args:
+        query: (B, H, L, D)
+        key:   (B, H, S, D)
+        value: (B, H, S, Dv)
+        dropout_p: Dropout prob for attention weights
+        scale: Optional scaling factor. Defaults to 1/sqrt(D).
+    Returns:
+        output: (B, H, L, Dv)
+    """
+    B, H, L, D = query.shape
+    _, _, S, _ = key.shape
+
+    scale = scale or 1.0 / math.sqrt(D)
+
+    # Compute raw attention scores
+    attn_scores = query @ key.transpose(-2, -1) * scale
+
+    # # Build causal mask using broadcasting and indexing
+    # q_idx = torch.arange(L, device=query.device).view(L, 1)  # (L, 1)
+    # kv_idx = torch.arange(S, device=key.device).view(1, S)   # (1, S)
+    # causal_mask = q_idx >= kv_idx                            # (L, S) boolean
+
+
+    # Apply causal mask: convert True/False to 0/-inf
+    # attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
+    attn_scores = attn_scores.masked_fill(attn_mask, float("-inf"))
+
+    # Apply softmax and dropout
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+    # if dropout_p > 0.0:
+    #     attn_weights = torch.nn.functional.dropout(attn_weights, p=dropout_p)
+
+    # Final attention output
+    output = attn_weights @ value  # (B, H, L, Dv)
+    return output
+
+
+@torch.compile
+def attention_pytorch_sliding_window(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    window_size: int = 1024,
+    attn_mask: torch.Tensor = None,
+    dropout_p: float = 0.0,
+    scale: float = None,
+    enable_gqa: bool = False
+) -> torch.Tensor:
+    """
+    PyTorch implementation matching FlexAttention's generate_sliding_window:
+    - Left-only attention (causal)
+    - Sliding window of size `window_size` behind each token
+    """
+    N, H, L, D = query.shape
+    assert L == key.size(-2) == value.size(-2)
+
+    scale_factor = 1.0 / math.sqrt(D) if scale is None else scale
+    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (N, H, L, L)
+
+    attn_scores = attn_scores.masked_fill(attn_mask, float('-inf'))
+
+    # Apply softmax and dropout
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+
+    return attn_weights @ value
+
+
+from typing import Optional, Union
+def attention_pytorch_prefix_lm(
+    query: torch.Tensor,  # [B, H, S, D]
+    key: torch.Tensor,
+    value: torch.Tensor,
+    prefix_lengths: Union[int, torch.Tensor],  # scalar or [B]
+    attn_mask = None,
+    dropout_p: float = 0.0,
+    scale: Optional[float] = None,
+    training: bool = False,
+) -> torch.Tensor:
+    B, H, S, D = query.shape
+
+    # if isinstance(prefix_lengths, int):
+    #     prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
+    # assert prefix_lengths.shape == (B,), f"Expected prefix_lengths shape [B], got {prefix_lengths.shape}"
+
+    # Scale factor
+    scale = scale or (1.0 / math.sqrt(D))
+
+    # Compute attention scores: [B, H, S, S]
+    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
+
+    # # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
+    # q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
+    # k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
+    # prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+
+    # max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
+    # causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
+
+    attn_scores = attn_scores.masked_fill(attn_mask, float("-inf"))
+
+    # Compute softmax over attention scores
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+
+    return attn_weights @ value  # [B, H, S, D]
+
+
+@torch.compile
+def attention_pytorch_with_document(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    segment_ids: torch.Tensor,
+    doc_token_mask: torch.Tensor,
+    attn_mask=None,
+    dropout_p: float = 0.0,
+    scale: float = None,
+    enable_gqa: bool = False
+) -> torch.Tensor:
+    r"""
+    Args:
+        query (Tensor): shape (N, Hq, L, E)
+        key (Tensor): shape (N, H, S, E)
+        value (Tensor): shape (N, H, S, Ev)
+        segment_ids (LongTensor): shape (N, L); segment id for each token.
+        doc_token_mask (BoolTensor): shape (N, L); True for document tokens.
+        attn_mask (optional Tensor): broadcastable to (N, Hq, L, S)
+        dropout_p (float): Dropout probability.
+        scale (float, optional): Scaling factor.
+        enable_gqa (bool): Enables Grouped Query Attention.
+    """
+    N, Hq, L, E = query.shape
+    H, S = key.size(-3), key.size(-2)
+
+    assert L == S, "L == S expected for self-attention"
+
+    scale_factor = 1 / math.sqrt(E) if scale is None else scale
+
+    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (N, Hq, L, S)
+
+    # Construct the segment-based attention mask
+    seg_i = segment_ids.unsqueeze(2)  # (N, L, 1)
+    seg_j = segment_ids.unsqueeze(1)  # (N, 1, L)
+    same_segment = seg_i == seg_j     # (N, L, L)
+
+    doc_mask = doc_token_mask.unsqueeze(1).expand(-1, L, -1)  # (N, L, L)
+    can_attend = same_segment | doc_mask  # regular tokens attend to same segment + doc tokens
+
+    # Document tokens attend to everything
+    doc_as_query = doc_token_mask.unsqueeze(2).expand(-1, -1, L)  # (N, L, L)
+    doc_can_attend = torch.ones_like(can_attend)
+    final_mask = torch.where(doc_as_query, doc_can_attend, can_attend)  # (N, L, L)
+
+    # Expand mask to (N, Hq, L, S)
+    final_mask = final_mask.unsqueeze(1).expand(-1, Hq, -1, -1)
+    attn_scores = attn_scores.masked_fill(~final_mask, float('-inf'))
+
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+
+    return attn_weights @ value
 
 
 ##################
@@ -316,9 +607,40 @@ CONFIGS = {
     "batch_sizes": [32, 16, 8, 4, 2, 1],
     "seq_lengths": [512, 1024, 2048, 4096, 8192, 16384],
     "head_dims": [64, 128],
-    "causal": [True, False],
+    "causal": [True],
     "dropout_p": 0.0,
 }
+
+# dummy generate function 
+def generate_alibi_bias_pytorch(nheads): return lambda s, q, k: s - torch.arange(nheads, device="cuda").view(1, -1, 1, 1)
+
+def get_causal_mask(L: int, S: int, device: torch.device):
+    q_idx = torch.arange(L, device=device).view(L, 1)
+    kv_idx = torch.arange(S, device=device).view(1, S)
+    return (q_idx < kv_idx).to(torch.bool)  # shape: (L, S)
+
+def get_sliding_mask(query, window_size):
+    # Create (L, L) mask: True where j ∉ [i - window_size, i]
+    N, H, L, D = query.shape
+    q_idx = torch.arange(L, device=query.device).view(L, 1)
+    k_idx = torch.arange(L, device=query.device).view(1, L)
+    causal_sliding_mask = (q_idx < k_idx) | ((q_idx - k_idx) > window_size)  # shape (L, L)
+
+    # Expand to (N, H, L, L)
+    full_mask = causal_sliding_mask.unsqueeze(0).unsqueeze(0).expand(N, H, L, L)
+    return full_mask
+
+def get_prefix_lm_mask(query, prefix_lengths):
+    B, H, S, D = query.shape
+    prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
+     # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
+    q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
+    k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
+    prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+
+    max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
+    causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
+    return causal_prefix_mask
 
 # 'qkv' in name uses packed qkv input
 ATTENTION_REGISTRY = {
@@ -326,23 +648,39 @@ ATTENTION_REGISTRY = {
         q, k, v,# dropout_p=dropout_p#, is_causal=causal
     ),
     "flex_full": lambda q, k, v: flex_attention(q, k, v, score_mod=_identity),
+    "full_with_alibi": lambda q, k, v: attention_pytorch_alibi(
+        q, k, v, score_mod=generate_alibi_bias_pytorch(q.size(-3))# dropout_p=dropout_p#, is_causal=causal
+    ),
+    "flex_full_with_alibi": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_alibi_bias(q.size(-3))),
 
-    # "pytorch_sdpa": lambda q, k, v: F.scaled_dot_product_attention(
+    "full_with_softcap": lambda q, k, v: attention_softcapped(q, k, v, score_mod=generate_tanh_softcap(30, approx=False)
+    ),
+    "flex_full_with_softcap": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=False)),
+
+    # "full_with_softcap_approx": lambda q, k, v: attention_softcap_approx(
+    #     q, k, v, tahn_fnc=generate_tanh_softcap(30, approx=False) # dropout_p=dropout_p#, is_causal=causal
+    # ),
+    # "flex_full_with_softcap_approx": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=True)),
+
+    "full_with_causal": lambda q, k, v: attention_pytorch_causal(
+        q, k, v, attn_mask=get_causal_mask(q.shape[-2], k.shape[-2], "cuda")# dropout_p=dropout_p#, is_causal=causal
+    ),
+    "flex_full_with_causal": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
+
+    "full_with_sliding_window": lambda q, k, v: attention_pytorch_sliding_window(
+        q, k, v, window_size=256, attn_mask=get_sliding_mask(q, 256), # dropout_p=dropout_p#, is_causal=causal
+    ),
+    "flex_full_with_sliding_window": lambda q, k, v: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
+    
+    "full_with_prefix_lm": lambda q, k, v: attention_pytorch_prefix_lm(
+        q, k, v, prefix_lengths=256, attn_mask=get_prefix_lm_mask(q, 256) # dropout_p=dropout_p#, is_causal=causal
+    ),
+    "flex_full_with_prefix_lm": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256),B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
+    
+    # "full_with_document": lambda q, k, v: attention_pytorch_with_document(
     #     q, k, v,# dropout_p=dropout_p#, is_causal=causal
     # ),
-    # "flex": lambda qkv, score_mod, block_mask: flex_attention(
-    #     qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], score_mod=score_mod, block_mask=block_mask
-    # ),
-    # "flash2": flash_attn_qkvpacked_func,
-    # "triton": attention_triton if attention_triton else None,
-    # "xformers.c": lambda q, k, v, causal: xops.memory_efficient_attention(
-    #     q, k, v, attn_bias=xops.LowerTriangularMask() if causal else None,
-    #     op=(xops.fmha.cutlass.FwOp, xops.fmha.cutlass.BwOp)
-    # ) if xops else None,
-    # "xformers.f": lambda q, k, v, causal: xops.memory_efficient_attention(
-    #     q, k, v, attn_bias=xops.LowerTriangularMask() if causal else None,
-    #     op=(xops.fmha.flash.FwOp, xops.fmha.flash.BwOp)
-    # ) if xops else None,
+
 }
 
 
@@ -378,15 +716,22 @@ def run_benchmark(config, attention_name: str, attention_func,
     tflops_fwd = efficiency(flops, time_f)
     # tfps_bwd = efficiency(flop_bwd, time_b)
 
-    # # Correctness check
-    # if not skip_correctness
-    #     if impl != "pytorch":
-    #         ref_out = ref_func()
-    #         attn_out = attn_func()
-    #         torch.testing.assert_close(attn_out, ref_out, atol=1e-1, rtol=1e-2)
-    #         if verbose:
-    #             print(f"Correctness check passed for {impl} ✅")
-
+    # === Correctness check ===
+    if not attention_name.startswith("full"):
+        # ref_name = "full"
+        ref_name = attention_name.replace("flex_", "")
+        print(ref_name)
+        ref_func = ATTENTION_REGISTRY.get(ref_name, None)
+        if ref_func is not None:
+            with torch.no_grad():
+                out_ref = ref_func(q, k, v)
+                out_test = attention_func(q, k, v)
+            try:
+                torch.testing.assert_close(out_test, out_ref, rtol=1e-2, atol=1e-2)
+            except AssertionError as e:
+                print(f"❌ {attention_name} failed correctness check vs {ref_name}:\n{e}")
+            else:
+                print(f"✅ {attention_name} passed correctness check vs {ref_name}")
 
     return time_f, tflops_fwd
 
@@ -418,7 +763,11 @@ def main(args):
                 results = all_results.sublist()
                 for attention_name, attention_func in ATTENTION_REGISTRY.items():
                     assert callable(attention_func), attention_name
-                    res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd)
+                    # res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd)
+                    try:
+                        res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd)
+                    except:
+                        res = (-1,-1)
                     result = Result(attention_name, *res)
                     results.append([*result, *config])
                 # Print results for this config
