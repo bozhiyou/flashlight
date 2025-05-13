@@ -160,7 +160,24 @@ try:
 except ImportError:
     xops = None
 
+# Flex attention related mask and modification functions
+from torch.nn.attention.flex_attention import (
+    _DEFAULT_SPARSE_BLOCK_SIZE,
+    create_block_mask,
+    create_mask,
+    flex_attention,
+    _identity,
+    _score_mod_signature,
+    _mask_mod_signature,
+)
 
+@lru_cache
+def create_block_mask_cached(mask_mod, B, H, M, N, device="cuda"):
+    block_mask = create_block_mask(mask_mod, B, H, M, N, device=device)
+    return block_mask
+
+
+flex_attention = torch.compile(flex_attention, dynamic=False)
 try:
     from attn_gym.masks import causal_mask
     from attn_gym.masks.document_mask import length_to_offsets
@@ -171,24 +188,6 @@ try:
 
     )
     from attn_gym.mods import generate_alibi_bias, generate_tanh_softcap
-    # Flex attention related mask and modification functions
-    from torch.nn.attention.flex_attention import (
-        _DEFAULT_SPARSE_BLOCK_SIZE,
-        create_block_mask,
-        create_mask,
-        flex_attention,
-        _identity,
-        _score_mod_signature,
-        _mask_mod_signature,
-    )
-
-    @lru_cache
-    def create_block_mask_cached(mask_mod, B, H, M, N, device="cuda"):
-        block_mask = create_block_mask(mask_mod, B, H, M, N, device=device)
-        return block_mask
-
-    
-    flex_attention = torch.compile(flex_attention, dynamic=False)
 except ImportError:
     print("IMPORT ERROR")
     def causal_mask(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
