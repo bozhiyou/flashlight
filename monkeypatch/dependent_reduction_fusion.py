@@ -13,7 +13,6 @@ from torch._inductor.virtualized import V, OpsValue
 from torch.utils._ordered_set import OrderedSet
 
 
-
 from torch._inductor.ops_handler import ReductionType
 from torch._inductor.codegen.common import CSEVariable
 from torch._inductor.utils import is_welford_reduction, IndentedBuffer
@@ -25,7 +24,7 @@ from torch._inductor.codegen.simd import constant_repr
 @monkey.patch(TritonKernelOverrides)
 @staticmethod
 def reduction_localbuf(
-    _self: TritonKernelOverrides,
+    # _self: TritonKernelOverrides,
     src_dtype: torch.dtype,
     reduction_type: ReductionType,
 ):
@@ -63,7 +62,7 @@ def reduction_localbuf(
 @monkey.patch(TritonKernelOverrides)
 @staticmethod
 def reduction_combine(
-    _self: TritonKernelOverrides,
+    # _self: TritonKernelOverrides,
     src_dtype: torch.dtype,
     reduction_type: ReductionType,
     value: Union[CSEVariable, Tuple[CSEVariable, ...]],
@@ -108,7 +107,7 @@ def reduction_combine(
 @monkey.patch(TritonKernelOverrides)
 @staticmethod
 def reduction_update(
-    _self: TritonKernelOverrides,
+    # _self: TritonKernelOverrides,
     accumulator: CSEVariable,
     updated: CSEVariable,
 ):
@@ -142,7 +141,7 @@ def reduction_update(
 @monkey.patch(TritonKernelOverrides)
 @staticmethod
 def reduction_finalreduce(
-    _self: TritonKernelOverrides,
+    # _self: TritonKernelOverrides,
     dtype: torch.dtype,
     src_dtype: torch.dtype,
     reduction_type: ReductionType,
@@ -193,6 +192,7 @@ def reduction_finalreduce(
 
 
 
+
 from torch._inductor.loop_body import InterpreterShim
 # from torch.fx.node import Argument, Target
 class DependencyGraphInterpreter(InterpreterShim):
@@ -209,7 +209,7 @@ def set_subgraph_body(self, body_name: str):
 
 @monkey.patch(TritonKernelOverrides)
 def modification(
-        _self: TritonKernelOverrides, subgraph: fx.Graph, *subgraph_args, output_name: str = '', **fixed_inputs
+        _self: TritonKernelOverrides, subgraph_id: int, *subgraph_args, output_name: str = '', **fixed_inputs
     ) -> str:
     """
     This function is adapted from TritonTemplateKernel::modification in torch/_inductor/select_algorithm.py.
@@ -224,7 +224,8 @@ def modification(
     #     num += 1
     # with self.create_subgraph_body(f"mod_{subgraph_number}_{num}"):
     if True:
-        assert isinstance(subgraph, fx.Graph)
+        subgraph = getattr(TritonKernelOverrides, 'subgraphs')[subgraph_id]
+        assert isinstance(subgraph, fx.Graph), f"{type(subgraph)} {repr(subgraph)}"
         # assert (
         #     self.body.getvalue() == ""
         # ), "Body should be clear before adding a modification"
@@ -311,6 +312,21 @@ def find_unique_node(graph: fx.Graph, *, op, target) -> fx.Node:
     candidates = graph.find_nodes(op=op, target=target)
     assert len(candidates) == 1, f"{op, target} with multiple matches {candidates}"
     return next(iter(candidates))
+
+REDUCTION_TARGET = {'reduction'}
+
+def find_unique_reduction(graph: fx.Graph) -> fx.Node:
+    """Default to
+        find_unique_node(graph, op='call_method', target='reduction')
+    Allow custom reduction registered in `REDUCTION_TARGET`.
+    """
+    for rtarget in REDUCTION_TARGET:
+        candidates = graph.find_nodes(op='call_method', target=rtarget)
+        if not candidates:
+            continue
+        assert len(candidates) == 1, f"multiple {rtarget}: {candidates}"
+        return next(iter(candidates))
+    raise ValueError(f"no reduction node found ({REDUCTION_TARGET})")
 
 # helpers
 def flatten_args(node: fx.Node):
@@ -559,7 +575,7 @@ def suppress_linting(node: fx.Node):
     output.args += (node,)
 
 def decompose_reduction(reduction: fx.Node, user_reduction: fx.Node | None = None):
-    assert reduction.op == 'call_method' and reduction.target == 'reduction'
+    assert reduction.op == 'call_method' and reduction.target in REDUCTION_TARGET
     ops_handler, dtype, src_dtype, reduction_type, value= reduction.args
     with reduction.graph.inserting_before(reduction):
         localbuf = reduction.graph.create_node(
@@ -607,12 +623,12 @@ class NodeRemapping(collections.UserDict[fx.Node, fx.Node]):
         dst.meta['origin'] = src
         super().__setitem__(src, dst)
 
-def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out_to_keep:set[str] = set()):
+def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, shared_reads: set = set(), anc_out_to_keep: set[str] = set()):
     """ancestor reduction --> dependent reduction"""
     anc_output: fx.Node = find_unique_node(anc_graph, op='output', target='output')
     anc_reduction_stores = {name_of_store_reduction(store_reduction): store_reduction for store_reduction in anc_output.all_input_nodes}
 
-    reduction: fx.Node = find_unique_node(graph, op='call_method', target='reduction')
+    reduction: fx.Node = find_unique_reduction(graph)
     # 0. trace dependency path
     all_loads = collections.defaultdict(OrderedSet)
     for ld in graph.find_nodes(op='call_method', target='load'):
@@ -629,6 +645,7 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
     dependency_graph: fx.Graph = fx.Graph()
     dag_node_remapping = NodeRemapping()
     out_dag_input_remapping: dict[fx.Node, fx.Node] = {}
+    need_decompose = False
     for name, dag in dependency_dag_nodes.items():
         for ld in dependency_loads[name]:
             if ld.args[0] not in dag_node_remapping:  # ops handler
@@ -638,6 +655,7 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
                     dag_node_remapping[ld.args[0]],
                     'updated_' + name_of_load(ld),
             ), type_expr=ld.type)
+
         out_dag_args = set()
         def copy_from_dag(arg: fx.Node):
             if arg in dag_node_remapping:
@@ -652,8 +670,12 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
                 continue
             dag_node_remapping[node] = dependency_graph.node_copy(
                 node, arg_transform=copy_from_dag)
+        if not out_dag_args:
+            # TODO massage indexing here
+            continue  # linear dependency, no "merging" -> no need to decompose
         if len(out_dag_args) > 1:
             return False  # cannot factor out more than one non-dependency input
+        need_decompose = True
         pre_merge_node = next(iter(out_dag_args))
         assert len(pre_merge_node.users) == 1
         original_merge_node = next(iter(pre_merge_node.users))
@@ -723,18 +745,20 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
             return node_remapping[arg_node]
         if arg_node.op == 'placeholder':
             return find_unique_node(graph, op=arg_node.op, target=arg_node.target)
-        if arg_node.op == 'call_module' and arg_node.target =='get_index':
-            key = name_of_index(arg_node)
-            if key not in index_to_getter:
-                index_to_getter[key] = graph.node_copy(
-                    arg_node, arg_transform=recursively_copy_from_ancestor_graph)
-            return index_to_getter[key]
-        if arg_node.op == 'call_method' and arg_node.target =='load':
-            key = flatten_args(arg_node)
-            if key not in arg_to_loader:
-                arg_to_loader[key] = graph.node_copy(
-                    arg_node, arg_transform=recursively_copy_from_ancestor_graph)
-            return arg_to_loader[key]
+        if shared_reads:
+            if arg_node.op == 'call_module' and arg_node.target =='get_index':
+                key = name_of_index(arg_node)
+                if key not in index_to_getter:
+                    index_to_getter[key] = graph.node_copy(
+                        arg_node, arg_transform=recursively_copy_from_ancestor_graph)
+                    # TODO remap index
+                return index_to_getter[key]
+            if arg_node.op == 'call_method' and arg_node.target =='load':
+                key = flatten_args(arg_node)
+                if key not in arg_to_loader:
+                    arg_to_loader[key] = graph.node_copy(
+                        arg_node, arg_transform=recursively_copy_from_ancestor_graph)
+                return arg_to_loader[key]
         node_ = graph.node_copy(arg_node, arg_transform=recursively_copy_from_ancestor_graph)
         node_remapping[arg_node] = node_
         return node_
@@ -755,12 +779,18 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
             anc_reduction_ = graph.node_copy(
                 anc_reduction, arg_transform=recursively_copy_from_ancestor_graph
             )
-            decomposed = decompose_reduction(anc_reduction_, user_reduction=reduction)
-            decomposed_ancestors[name] = decomposed
-            for ld in dependency_loads[name]:
-                ld.replace_all_uses_with(decomposed['combine'])
-                recursively_erase_node(ld)
-            node_remapping[anc_reduction] = decomposed['finalreduce']
+            if need_decompose:
+                decomposed = decompose_reduction(anc_reduction_, user_reduction=reduction)
+                decomposed_ancestors[name] = decomposed
+                for ld in dependency_loads[name]:
+                    ld.replace_all_uses_with(decomposed['combine'])
+                    recursively_erase_node(ld)
+                node_remapping[anc_reduction] = decomposed['finalreduce']
+            else:
+                for ld in dependency_loads[name]:
+                    ld.replace_all_uses_with(anc_reduction_)
+                    recursively_erase_node(ld)
+                node_remapping[anc_reduction] = anc_reduction_
 
         if name not in anc_out_to_keep:
             continue
@@ -776,76 +806,81 @@ def eliminate_reduction_dependency(graph: fx.Graph, anc_graph: fx.Graph, anc_out
                 (output.args[0], node_remapping[anc_store_reduction])
             ) + output.args[1:]
 
-    # 2. add replay function
-    decomposed = decompose_reduction(reduction)
-    dependency_node_remapping: dict[fx.Node, fx.Node] = {}
-    def recursively_copy_from_dependency_graph(node: fx.Node):
-        if node.op == 'placeholder' and node.target == 'ops':
-            dependency_node_remapping[node] = find_unique_node(graph,
-                op=node.op, target=node.target)
-        if node.target == 'stale_partial_reduction':
-            dependency_node_remapping[node] = decomposed['localbuf']
-        if node.target == 'prev_ancestor_partial_reduction':
-            dependency_node_remapping[node] = decomposed_ancestors[
-                node.args[0]]['localbuf']
-        if node.op == 'call_method' and node.target == 'load':
-            dependency_node_remapping[node] = decomposed_ancestors[
-                name_of_load(node.meta['origin'])]['combine']
-        if node not in dependency_node_remapping:
-            dependency_node_remapping[node] = graph.node_copy(
-                node,
-                arg_transform=recursively_copy_from_dependency_graph
+    if need_decompose:
+        subgraphs = getattr(TritonKernelOverrides, 'subgraphs', {})
+        dependency_graph_id = len(subgraphs)
+        subgraphs[dependency_graph_id] = dependency_graph
+        setattr(TritonKernelOverrides, 'subgraphs', subgraphs)
+        # 2. add replay function
+        decomposed = decompose_reduction(reduction)
+        dependency_node_remapping: dict[fx.Node, fx.Node] = {}
+        def recursively_copy_from_dependency_graph(node: fx.Node):
+            if node.op == 'placeholder' and node.target == 'ops':
+                dependency_node_remapping[node] = find_unique_node(graph,
+                    op=node.op, target=node.target)
+            if node.target == 'stale_partial_reduction':
+                dependency_node_remapping[node] = decomposed['localbuf']
+            if node.target == 'prev_ancestor_partial_reduction':
+                dependency_node_remapping[node] = decomposed_ancestors[
+                    node.args[0]]['localbuf']
+            if node.op == 'call_method' and node.target == 'load':
+                dependency_node_remapping[node] = decomposed_ancestors[
+                    name_of_load(node.meta['origin'])]['combine']
+            if node not in dependency_node_remapping:
+                dependency_node_remapping[node] = graph.node_copy(
+                    node,
+                    arg_transform=recursively_copy_from_dependency_graph
+                )
+            return dependency_node_remapping[node]
+        with graph.inserting_before(decomposed['combine']):
+            # updated_partial = graph.node_copy(
+            #     output_handle.args[0], arg_transform=recursively_copy_from_dependency_graph
+            # )
+            updated_partial = graph.create_node(
+                op='call_method', target='modification', args=(
+                    decomposed['combine'].args[0],  # ops handler
+                    dependency_graph_id,
+                    decomposed['localbuf']
+                ), kwargs={
+                    'localbuf': decomposed['localbuf'],
+                    **{f'stale_{name}': decomposed_ancestors[name]['localbuf'] for name in decomposed_ancestors},
+                    **{f'updated_{name}': decomposed_ancestors[name]['combine'] for name in decomposed_ancestors},
+                }
             )
-        return dependency_node_remapping[node]
-    with graph.inserting_before(decomposed['combine']):
-        # updated_partial = graph.node_copy(
-        #     output_handle.args[0], arg_transform=recursively_copy_from_dependency_graph
-        # )
-        updated_partial = graph.create_node(
-            op='call_method', target='modification', args=(
-                decomposed['combine'].args[0],  # ops handler
-                dependency_graph,
-                decomposed['localbuf']
-            ), kwargs={
-                'localbuf': decomposed['localbuf'],
-                **{f'stale_{name}': decomposed_ancestors[name]['localbuf'] for name in decomposed_ancestors},
-                **{f'updated_{name}': decomposed_ancestors[name]['combine'] for name in decomposed_ancestors},
-            }
-        )
-    decomposed['combine'].args = decomposed['combine'].args[:-1] + (updated_partial,)  # replace last arg of combine
+        decomposed['combine'].args = decomposed['combine'].args[:-1] + (updated_partial,)  # replace last arg of combine
 
-    dependency_node_remapping: dict[fx.Node, fx.Node] = {}
-    def recursively_copy_from_dependency_graph(node: fx.Node):
-        if node.op == 'placeholder' and node.target == 'ops':
-            dependency_node_remapping[node] = 'suffix_ops'
-        if node.target == 'stale_partial_reduction':
-            dependency_node_remapping[node] = decomposed['localbuf']
-        if node.target == 'prev_ancestor_partial_reduction':
-            dependency_node_remapping[node] = decomposed_ancestors[
-                node.args[0]]['localbuf']
-        if node.op == 'call_method' and node.target == 'load':
-            dependency_node_remapping[node] = decomposed_ancestors[
-                name_of_load(node.meta['origin'])]['finalreduce']
-        if node not in dependency_node_remapping:
-            dependency_node_remapping[node] = graph.node_copy(
-                node,
-                arg_transform=recursively_copy_from_dependency_graph
+        dependency_node_remapping: dict[fx.Node, fx.Node] = {}
+        def recursively_copy_from_dependency_graph(node: fx.Node):
+            if node.op == 'placeholder' and node.target == 'ops':
+                dependency_node_remapping[node] = 'suffix_ops'
+            if node.target == 'stale_partial_reduction':
+                dependency_node_remapping[node] = decomposed['localbuf']
+            if node.target == 'prev_ancestor_partial_reduction':
+                dependency_node_remapping[node] = decomposed_ancestors[
+                    node.args[0]]['localbuf']
+            if node.op == 'call_method' and node.target == 'load':
+                dependency_node_remapping[node] = decomposed_ancestors[
+                    name_of_load(node.meta['origin'])]['finalreduce']
+            if node not in dependency_node_remapping:
+                dependency_node_remapping[node] = graph.node_copy(
+                    node,
+                    arg_transform=recursively_copy_from_dependency_graph
+                )
+            return dependency_node_remapping[node]
+        with graph.inserting_before(decomposed['finalreduce']):
+            updated_partial = graph.create_node(
+                op='call_method', target='modification', args=(
+                    decomposed['finalreduce'].args[0],  # ops handler
+                    dependency_graph_id,
+                    decomposed['localbuf']
+                ), kwargs={
+                    'ops': 'OpsHandlerOverride',  # subgraph ops handler
+                    'localbuf': decomposed['localbuf'],
+                    **{f'stale_{name}': decomposed_ancestors[name]['localbuf'] for name in decomposed_ancestors},
+                    **{f'updated_{name}': decomposed_ancestors[name]['finalreduce'] for name in decomposed_ancestors},
+                }
             )
-        return dependency_node_remapping[node]
-    with graph.inserting_before(decomposed['finalreduce']):
-        updated_partial = graph.create_node(
-            op='call_method', target='modification', args=(
-                decomposed['finalreduce'].args[0],  # ops handler
-                dependency_graph,
-                decomposed['localbuf']
-            ), kwargs={
-                'ops': 'OpsHandlerOverride',  # subgraph ops handler
-                'localbuf': decomposed['localbuf'],
-                **{f'stale_{name}': decomposed_ancestors[name]['localbuf'] for name in decomposed_ancestors},
-                **{f'updated_{name}': decomposed_ancestors[name]['finalreduce'] for name in decomposed_ancestors},
-            }
-        )
-    decomposed['finalreduce'].args = decomposed['finalreduce'].args[:-1] + (updated_partial,)  # replace last arg of combine
+        decomposed['finalreduce'].args = decomposed['finalreduce'].args[:-1] + (updated_partial,)  # replace last arg of combine
 
 
 
@@ -870,18 +905,16 @@ def reductions_fit(node: SchedulerNode, other: SchedulerNode):
     """Adapted from SIMDScheduling.generate_node_schedule.<locals>.fits_in_main_body"""
     _, (numel, rnumel) = other.group
     _, (node_numel, node_rnumel) = node.group
-    return (node_numel == numel and node_rnumel == rnumel) or (
-        node_numel == numel * rnumel and node_rnumel == 1
-    )
+    return node_numel == numel and node_rnumel == rnumel    # loop fusion within same kernel
 
 def check_ancestors(node: SchedulerNode):
     if not node.ancestors:
-        return False
+        return []
     for anc_name in node.ancestors:
         anc = node.scheduler.name_to_node[anc_name]
-        if not anc.is_reduction() or not reductions_fit(node, anc):
-            return False
-    return True
+        if anc.is_reduction() and reductions_fit(node, anc):
+            return [anc_name]
+    return []
 
 def fuse_reductions(snodes: list[SchedulerNode]) -> list[SchedulerNode]:
     if len(snodes) < 2:
@@ -892,14 +925,16 @@ def fuse_reductions(snodes: list[SchedulerNode]) -> list[SchedulerNode]:
             continue
         # node: reduction node with ancestors which are all fit reductions
         to_discard: set[str] = set()
-        for anc_name in node.ancestors:
+        for anc_name in check_ancestors(node): # node.ancestors:
             anc: SchedulerNode = node.scheduler.name_to_node[anc_name]
             output_names_to_keep = {x.get_name() for x in anc.get_outputs()
                 if all(u.node != node for u in x.users) or len(x.users) > 1}
+
             if eliminate_reduction_dependency(
                 node._body.root_block.graph,
                 anc._body.root_block.graph,
-                anc_out_to_keep=output_names_to_keep
+                shared_reads=anc.read_writes.reads & node.read_writes.reads,
+                anc_out_to_keep=output_names_to_keep,
             ):
                 buffers_to_keep = [anc.outputs_by_name.pop(name) for name in output_names_to_keep]
                 node.outputs = buffers_to_keep + node.outputs
@@ -907,14 +942,15 @@ def fuse_reductions(snodes: list[SchedulerNode]) -> list[SchedulerNode]:
                     assert name not in node.outputs_by_name, f" {node} sharing same output buffer {name} with ancestor {anc}"
                     node.outputs_by_name[name] = buf
                     anc.outputs.remove(buf)
+
                 to_discard.add(anc_name)
 
-        if len(node.ancestors) == len(to_discard):  # only if all dependencies fit
-            for anc_name in to_discard:
-                anc = node.scheduler.name_to_node[anc_name]
-                for obuf in anc.get_outputs():
-                    obuf.users = [u for u in obuf.users if u.get_name() != node.get_name()]
+        # if len(node.ancestors) == len(to_discard):  # only if all dependencies fit
+        for anc_name in to_discard:
+            anc = node.scheduler.name_to_node[anc_name]
+            for obuf in anc.get_outputs():
+                obuf.users = [u for u in obuf.users if u.get_name() != node.get_name()]
 
-            node.ancestors.clear()
+        node.ancestors.clear()
     snodes = [snode for snode in snodes if snode.get_outputs()]
     return snodes
