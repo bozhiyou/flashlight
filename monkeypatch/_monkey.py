@@ -1,3 +1,6 @@
+"""
+Requires Python >= 3.10 to support staticmethod/classmethod patching.
+"""
 import functools
 import contextlib
 
@@ -16,10 +19,11 @@ def get_fallback_hook():
     return _threadlocal.fallback_stack[-1]
 
 def fallback(*args, **kwargs):
-    assert len(_threadlocal.fallback_stack), "No fallback for interception; call original function directly"
+    assert len(_threadlocal.fallback_stack), "No fallback for e.g. generator functions; call original function directly"
     return get_fallback_hook()(*args, **kwargs)
 
 default_backup_name = lambda origin: f"_{origin}_"
+class NoFallback: pass
 
 def patch(obj, name: str = ''):
     def wrapper(new):
@@ -28,22 +32,28 @@ def patch(obj, name: str = ''):
             _threadlocal.fallback_stack.append(fallback)
             yield
             _threadlocal.fallback_stack.pop()
+        
+        def patched(*args, **kwargs):
+            with context():
+                return new(*args, **kwargs)
+        if hasattr(new, '__code__') and new.__code__.co_qualname.startswith('contextmanager'):
+            @contextlib.contextmanager
+            def patched_contextmanager(*args, **kwargs):
+                with context():
+                    with new(*args, **kwargs):
+                        yield
+            patched = patched_contextmanager
 
         nonlocal name
         name = name or new.__name__
         assert name, "Illegal name"
-        fallback = getattr(obj, name, None)
-        ctx, maybe_wrap = (
-            context, functools.wraps(fallback)
-        )  if fallback is not None else (
-            contextlib.nullcontext, lambda f: f
-        )
-
-        @maybe_wrap
-        def patched(*args, **kwargs):
-            with ctx():
-                return new(*args, **kwargs)
+        fallback = getattr(obj, name, NoFallback)
+        if fallback is not NoFallback:
+            patched = functools.wraps(fallback)(patched)
+        if isinstance(new, staticmethod):
+            patched = staticmethod(patched)
         setattr(obj, name, patched)
+
         return patched
     return wrapper
 
@@ -85,10 +95,11 @@ def intercept(obj, name: str = '', *, times: int = 0):
 ##############
 # debug helper
 ##############
-def _property(cls, fget=None, fset=None):
+py_property = property
+def property(cls, fget=None, fset=None):
     """Property debugging helper.
     ```
-    @monkey._property(A)
+    @monkey.property(A)
     def attr(self):
         return self._attr  # breakpoint here to monitor access
     @attr.setter
@@ -100,7 +111,7 @@ def _property(cls, fget=None, fset=None):
         cls = type(cls)
     def getter(fget_, fset_=fset):
         assert callable(fget_)
-        attr = property(fget_)
+        attr = py_property(fget_)
         setattr(cls, fget_.__name__, attr)
         def setter(fset__):
             assert callable(fset__)
@@ -110,7 +121,7 @@ def _property(cls, fget=None, fset=None):
         if fset_:
             return setter(fset_)
         # property.setter is read-only
-        return type('', (property,),
+        return type('', (py_property,),
                     {'setter': lambda self, fset: setter(fset)})()
     if fget:
         return getter(fget)

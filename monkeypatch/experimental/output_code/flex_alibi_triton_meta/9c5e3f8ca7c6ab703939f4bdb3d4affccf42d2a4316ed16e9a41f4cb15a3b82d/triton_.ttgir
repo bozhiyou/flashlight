@@ -1,0 +1,16 @@
+#blocked = #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#loc = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":18:0)
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, triton_gpu.target = "cuda:80", "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func public @triton_(%arg0: !tt.ptr<i32> {tt.divisibility = 16 : i32} loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":18:0)) attributes {noinline = false} {
+    %cst = arith.constant dense<1> : tensor<1xi32, #blocked> loc(#loc1)
+    %c0_i32 = arith.constant 0 : i32 loc(#loc2)
+    %0 = tt.addptr %arg0, %c0_i32 : !tt.ptr<i32>, i32 loc(#loc2)
+    %1 = tt.splat %0 : !tt.ptr<i32> -> tensor<1x!tt.ptr<i32>, #blocked> loc(#loc2)
+    tt.store %1, %cst : tensor<1x!tt.ptr<i32>, #blocked> loc(#loc3)
+    tt.return loc(#loc4)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc(unknown)
+#loc2 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:25)
+#loc3 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:64)
+#loc4 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:4)

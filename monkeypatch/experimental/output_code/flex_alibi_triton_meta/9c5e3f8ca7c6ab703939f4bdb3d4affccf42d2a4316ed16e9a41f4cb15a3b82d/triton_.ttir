@@ -1,0 +1,15 @@
+#loc = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":18:0)
+module {
+  tt.func public @triton_(%arg0: !tt.ptr<i32> {tt.divisibility = 16 : i32} loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":18:0)) attributes {noinline = false} {
+    %cst = arith.constant dense<1> : tensor<1xi32> loc(#loc1)
+    %c0_i32 = arith.constant 0 : i32 loc(#loc2)
+    %0 = tt.addptr %arg0, %c0_i32 : !tt.ptr<i32>, i32 loc(#loc2)
+    %1 = tt.splat %0 : !tt.ptr<i32> -> tensor<1x!tt.ptr<i32>> loc(#loc2)
+    tt.store %1, %cst : tensor<1x!tt.ptr<i32>> loc(#loc3)
+    tt.return loc(#loc4)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc(unknown)
+#loc2 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:25)
+#loc3 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:64)
+#loc4 = loc("/work/06112/byou/ls6/torchinductor_cache/q7/cq7vnxcrlrlhvs7n4zidf6taflwdotkdbsogyczwtxatwmrfy4cs.py":24:4)

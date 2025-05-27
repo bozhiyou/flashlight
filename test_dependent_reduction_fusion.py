@@ -11,10 +11,11 @@ from torch.testing import assert_close, make_tensor
 # comment the line to disable the patch
 from monkeypatch import dependent_reduction_fusion
 
+
 DEVICE = torch.device("cuda:0")
 BATCH = 2
 N_CTX = 2048
-DTYPE = torch.float32
+DTYPE = torch.bfloat16
 
 import torch.nn.functional as F
 def softmax(x, dim=None):
