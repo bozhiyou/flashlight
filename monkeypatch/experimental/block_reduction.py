@@ -1,4 +1,6 @@
 from .. import _monkey as monkey
+from .._fusion_common import TRITON_MAX_RBLOCK
+
 from typing import Any, Sequence, Callable
 
 import collections
@@ -1452,7 +1454,7 @@ def _blockreduction_configs(
                     c[f"{prefix.upper()}BLOCK{suffix}"] = block[prefix]
                     c[f"{prefix.upper()}BLOCK"] += ((v, c[arg]),)
                 if 'BLOCK' in arg:
-                    if v <= 2048:
+                    if v <= TRITON_MAX_RBLOCK:
                         c[arg] = v
                     else:
                         c[arg] = block[arg[0].lower()]
