@@ -1,7 +1,8 @@
-from . import _monkey as monkey
+from .. import _monkey as monkey
 
 import itertools
 import functools
+import collections
 from typing import Union, List, Tuple, Optional, Any
 
 import torch
@@ -9,6 +10,7 @@ import torch._inductor.select_algorithm  # import before bmm to avoid circular i
 import torch._inductor.kernel.bmm
 from torch._inductor.virtualized import V
 from torch._inductor.codegen.triton import BlockParameters, BlockPtrOptions
+from torch._dynamo.utils import counters
 from torch._inductor.utils import sympy_index_symbol, IndentedBuffer
 
 
@@ -131,6 +133,7 @@ def make_output_block_ptr(self: torch._inductor.select_algorithm.TritonTemplateK
     block_shape: tuple[str | int],
     offsets: tuple[str | int]
 ):
+    counters.setdefault("inductor", collections.Counter())["block_ptr_bmm"] += 1
     assert isinstance(name, str)
     assert torch._inductor.config.triton.use_block_ptr and self.allow_block_ptr, "block_ptr disabled"
     assert not self._load_mask, "additional mask disables block_ptr"
@@ -244,3 +247,48 @@ def store_output(
         # self.codegen_body()
         self.render_hooks["<STORE_OUTPUT>"] = lambda: f"tl.store({indices}, {self.epilogue_fn(*epilogue_args)}.to({indices}.dtype.element_ty))"
     return "<STORE_OUTPUT>"
+
+if __name__ == "__main__":
+    from torch._inductor.test_case import run_tests, TestCase
+    from torch.testing import assert_close, make_tensor
+    import torch._inductor.config as inductor_config
+
+    class BmmBlockPtrTest(TestCase):
+        def _test_bmm_block_ptr(self, dtype):
+            def bmm(a, b):
+                return torch.bmm(a, b)
+
+            # The original test used a large N_CTX, which is good for benchmarking.
+            # For a unit test, smaller values are better for faster execution.
+            for batch, m, k, n in [
+                (2, 1024, 128, 512),
+                (1, 2048, 64, 256),
+                (4, 512, 256, 1024),
+                (2, 64, 32, 128),  # smaller case
+            ]:
+                with self.subTest(batch=batch, m=m, k=k, n=n, dtype=dtype):
+                    a = make_tensor((batch, m, k), dtype=dtype, device=self.device)
+                    b = make_tensor((batch, k, n), dtype=dtype, device=self.device)
+
+                    o0 = bmm(a, b)
+
+                    counters.clear()
+                    # The patch enables autotuning and disables ATEN to test the Triton template
+                    # It also enables use_block_ptr
+                    with inductor_config.patch({
+                        "triton.use_block_ptr": True,
+                        "max_autotune_gemm": True,
+                        "max_autotune_gemm_backends": "TRITON",
+                    }):
+                        o1 = torch.compile(bmm)(a, b)
+
+                    assert_close(o0, o1)
+                    self.assertEqual(counters["inductor"]["block_ptr_bmm"], 1)
+
+        def test_bmm_block_ptr_bf16(self):
+            self._test_bmm_block_ptr(torch.bfloat16)
+
+        def test_bmm_block_ptr_fp16(self):
+            self._test_bmm_block_ptr(torch.float16)
+
+    run_tests(needs="filelock")

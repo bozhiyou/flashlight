@@ -1,4 +1,4 @@
-from . import _monkey as monkey
+from .. import _monkey as monkey
 
 import functools
 from collections import deque
@@ -420,3 +420,43 @@ fused_bmm_template = TritonTemplate(
 """,
 debug=True
 )
+
+
+if __name__ == "__main__":
+    from torch._inductor.test_case import run_tests, TestCase
+    from torch.testing import assert_close, make_tensor
+    from torch._dynamo.utils import counters
+    import torch._inductor.config as inductor_config
+
+    class BmmFusionTest(TestCase):
+        def _test_fused_bmm(self, dtype):
+            def mmm(a, b, c):
+                return torch.bmm(torch.bmm(a, b), c)
+
+            # The original test used a large N_CTX, which is good for benchmarking.
+            # For a unit test, smaller values are better for faster execution.
+            for batch, n_ctx, head_dim in [
+                (2, 1024, 128),
+                (1, 2048, 64),
+                (4, 512, 256),
+                (2, 64, 32),  # smaller case
+            ]:
+                with self.subTest(batch=batch, n_ctx=n_ctx, head_dim=head_dim, dtype=dtype):
+                    q = make_tensor((batch, n_ctx, head_dim), dtype=dtype, device=self.device)
+                    k = make_tensor((batch, head_dim, n_ctx), dtype=dtype, device=self.device)
+                    v = make_tensor((batch, n_ctx, head_dim), dtype=dtype, device=self.device)
+
+                    o0 = mmm(q, k, v)
+
+                    counters.clear()
+                    # The patch enables autotuning and disables ATEN to test the Triton template
+                    with inductor_config.patch({"max_autotune_gemm": True, "max_autotune_gemm_backends": "TRITON"}):
+                        o1 = torch.compile(mmm)(q, k, v)
+
+                    assert_close(o0, o1)
+                    self.assertEqual(counters["inductor"]["bmm_fusion"], 1)
+
+        def test_fused_bmm_bf16(self):
+            self._test_fused_bmm(torch.bfloat16)
+
+    run_tests(needs="filelock")
