@@ -1,3 +1,9 @@
+"""
+bmm lowering uses a sum of mul to implement the dot product
+1) naive implementation using existing ir
+2) intended for a backend without ops.dot
+"""
+
 import torch
 from torch._dynamo.utils import counters
 from torch._inductor import ir, lowering as L
