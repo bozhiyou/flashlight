@@ -34,12 +34,12 @@ def grid(*numels):
             return numel
         return ceildiv(numel, block)
 
-    import operator
     def grid_fn(meta):
         x_grid = xnumel
         xblock = meta.get("XBLOCK", 1)
         if isinstance(xblock, tuple):  # {number of elements: number of blocks}
             for ne, nb in xblock:
+                # tile ne elements into nb blocks
                 assert x_grid % ne == 0, f"{x_grid} is not multiple of {ne}! {xnumel=} {xblock=}"
                 x_grid //= ne
                 x_grid *= nb
@@ -80,11 +80,24 @@ def _blockreduction_configs(
     inductor_meta={},
 ):
     f"""
-    Config space from {torch._inductor.kernel.flex_attention} and {torch._inductor.kernel.mm_common}.
+    Config space from `torch._inductor.kernel.flex_attention` and `torch._inductor.kernel.mm_common`.
     """
-    from torch._inductor.kernel.flex_attention import _get_default_config_fwd
+    # from torch._inductor.kernel.flex_attention import _get_default_config_fwd
     # (BLOCK_M, BLOCK_N, num_warps, num_stages)
-    configs: list[tuple[int, int, int, int]] = [(128, 64, 4, 3), (128, 64, 8, 3)]  # TODO @bozhiyou default to max or 1?
+    configs: list[tuple[int, int, int, int]] = [
+        (16, 64, 4, 2),
+        (16, 64, 4, 3),
+        (16, 64, 8, 2),
+        (32, 64, 4, 2),
+        (32, 64, 4, 3),
+        (32, 64, 8, 2),
+        (64, 64, 4, 2),
+        (64, 64, 4, 3),
+        (64, 64, 8, 2),
+        (128, 64, 4, 3),
+        (128, 64, 4, 3),
+        (128, 64, 8, 3)
+    ]  # TODO @bozhiyou default to max or 1?
     # configs = [(x, r, w, s) for x in (128, 64) for r in (16, 32, 64, 128) for w in (4, 8) for s in (2, 3)]
     # configs.append(_get_default_config_fwd(query))
     if torch._inductor.config.max_autotune:

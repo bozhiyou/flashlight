@@ -8,9 +8,9 @@ Putting It All Together: The `ReductionDependency.capture` method identifies pot
 Softmax Fusion: a key target/usecase for this is softmax. By fusing the max and sum reductions, a single, highly efficient online softmax kernel is generated for performance.
 """
 
-from ... import _monkey as monkey
+from .. import _monkey as monkey
 
-from .._common import TRITON_MAX_RBLOCK
+from ._common import TRITON_MAX_RBLOCK
 
 import collections
 import itertools
@@ -136,7 +136,7 @@ def max(x, dim):
     # return f"triton_helpers.max2({x}, {dim})"
     return f"tl.max({x}, {dim})"
 
-from .. import _reduction
+from . import _reduction
 
 from torch._inductor.loop_body import InterpreterShim
 # from torch.fx.node import Argument, Target
@@ -1261,7 +1261,8 @@ def _have_compatible_ranges(node1: BaseSchedulerNode, node2: BaseSchedulerNode):
 def can_fuse_vertical(self: scheduler.Scheduler,
     node1: BaseSchedulerNode, node2: BaseSchedulerNode
 ):
-    """Relax some of the stricter dependency matching rules, allowing more fusion candidates to be considered.
+    """
+    - Relax the case where `MemoryDeps` didn't match and read different locations of the same buffer.
     """
     node1_buf_names = node1.get_buffer_names()
     node1_op_names = node1.get_operation_names()
@@ -1275,6 +1276,20 @@ def can_fuse_vertical(self: scheduler.Scheduler,
         for rd in node2.unmet_dependencies:
             if self.fusable_read_and_write(rd, cd):
                 computed_deps.add(rd)
+            # aggressive fusion
+            elif isinstance(rd, MemoryDep):
+                def _drop_unused_symbols(md: MemoryDep):
+                    md_ranges = [(v, s) for v, s in zip(md.var_names, md.size) if v in md.index.free_symbols]
+                    if len(md_ranges) != len(md.var_names):
+                        return MemoryDep(md.name, md.index, tuple(x[0] for x in md_ranges), tuple(x[1] for x in md_ranges), md.mode)
+                    return md
+                _rd = _drop_unused_symbols(rd)
+                _cd = _drop_unused_symbols(cd)
+                if _rd is not rd or _cd is not cd and self.fusable_read_and_write(
+                    _rd, _cd
+                ):
+                    computed_deps.add(rd)
+
 
     for dep in node2.unmet_dependencies:
         if isinstance(dep, WeakDep) and self.fusable_weak_dep(dep, node1, node2):

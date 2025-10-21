@@ -704,7 +704,7 @@ def get_load_buffer(self: TritonKernel, indexing: IndexingOptions):
     if buffer_stack:= getattr(self, '_buffer_stack', []):
         loop_level = 0
         for var in indexing.index.free_symbols:
-            if _is_one_shot(var, self):
+            if _is_one_shot(var, self):  # one shot vars are defined at outter-most level
                 continue
             tree = self.range_tree_nodes[var].root
             loop_level = max(loop_level, _loop_level(tree, self))
@@ -778,50 +778,60 @@ def _pop_entry(self: IterationRangesRoot, entry: IterationRangesEntry):
 
 
 @monkey.patch(IterationRangesRoot)
-def lookup(self: IterationRangesRoot, divisor, length):
+def lookup(self: IterationRangesRoot, divisor, length) -> IterationRangesEntry:
+    """
+    Lookup a given IterationRangesEntry, creating it if needed.
+    A IterationRangesEntry represents a loop variable defined by indexing expression `self.index_sym() // divisor % length`.
+    """
     if V.graph.sizevars.statically_known_equals(divisor * length, self.numel):
         expr = FloorDiv(self.index_sym(), divisor)
     else:
         expr = ModularIndexing(self.index_sym(), divisor, length)
 
+    # Induction Variable Elimination: expr -> linear combination of basic variables
     _derived_indexing = getattr(self, '_derived_indexing', {})
     if expr in _derived_indexing:
         return _derived_indexing[expr]
 
     if expr not in self.nodes:
         for entry in self.nodes.values():
-            if entry.divisor == divisor:
-                if length < entry.length:  # need finer grained ranges
-                    assert V.graph.sizevars.statically_known_multiple_of(entry.length, length), f"{entry} cannot be decomposed by {length}"
-                    this_entry = monkey.fallback(self, divisor, length)
-                    upper_entry = self.lookup(divisor * length, entry.length // length)
-                    _pop_entry(self, entry)
-                    # TODO save this somewhere in self
-                    _derived_indexing[entry.expr] = this_entry.symbol() + length * upper_entry.symbol()
-                    setattr(self, '_derived_indexing', _derived_indexing)
-                    return this_entry
-                assert length > entry.length
-                return IterationRangesEntry(entry.symbol() + entry.length * self.lookup(divisor * entry.length, length))
-        # def _lookup(divisor, length):
-        #     for entry in sorted(
-        #         self.nodes.values(),
-        #         key=lambda x: (
-        #             V.graph.sizevars.size_hint(x.divisor),
-        #             V.graph.sizevars.size_hint(x.length)
-        #         ),
-        #         reverse=True
-        #     ):
-        #         if divisor == entry.divisor:
-        #             if length == entry.length:
-        #                 return entry
-        #             if length > entry.length and length % entry.length == 0:
-        #                 next_entry = _lookup(divisor * entry.length, length // divisor)
-        #                 if next_entry is not None:
-        #                     return entry.symbol() + entry.length * next_entry.symbol()
-        #     return None
-        # if res:= _lookup(divisor, length):
-        #     return res
-        
+            if entry.divisor != divisor:
+                continue
+            # divisor matches -> at the same loop level (by inside out order)
+            if length < entry.length:
+                # the target should be a basic variable, which has finer grained range -> handle target as base to decompose entry
+                assert V.graph.sizevars.statically_known_multiple_of(entry.length, length), f"{entry} cannot be decomposed by {length}"
+                this_entry = monkey.fallback(self, divisor, length)
+                upper_entry = self.lookup(divisor * length, entry.length // length)
+                new_expr = this_entry.symbol() + length * upper_entry.symbol()
+                # V.graph.sizevars.replacements[entry.symbol()] = new_expr
+                self.var_ranges[new_expr] = self.var_ranges[entry.symbol()]
+                _pop_entry(self, entry)
+                # TODO save this somewhere in self
+                _derived_indexing[entry.expr] = new_expr
+                for texpr in _derived_indexing:
+                    derivation = _derived_indexing[texpr]
+                    if entry.symbol() in derivation.free_symbols:
+                        _derived_indexing[texpr] = sympy_subs(derivation, {entry.symbol(): new_expr})
+                # populate var_ranges
+                for vexpr in [x for x in self.var_ranges if entry.symbol() in x.free_symbols]:
+                    new_vexpr = sympy_subs(vexpr, {entry.symbol(): new_expr})
+                    self.var_ranges[new_vexpr] = self.var_ranges.pop(vexpr)
+                    # iterate through all sub-expressions
+                    coeff = sorted(new_vexpr.as_coefficients_dict().values())
+                    subexpr = sympy.S.Zero
+                    for term, trange in zip(new_vexpr.as_ordered_terms(), coeff[1:]):
+                        subexpr += term
+                        assert subexpr not in self.var_ranges or self.var_ranges[subexpr] == trange
+                        self.var_ranges[subexpr] = trange
+                setattr(self, '_derived_indexing', _derived_indexing)
+                return this_entry
+            # target variable is an induction variable -> factor the current expression
+            assert length > entry.length
+            upper_entry = self.lookup(divisor * entry.length, length)
+            new_expr = (entry.symbol() + entry.length * (upper_entry.symbol() if isinstance(upper_entry, IterationRangesEntry) else upper_entry))
+            return new_expr
+
     return monkey.fallback(self, divisor, length)
     # """Not patching the original method because of incompatible signature.
     # + parent setting to reflect tree structure
@@ -1070,9 +1080,9 @@ def split_and_set_ranges(self: TritonKernel, lengths: list[list[sympy.Expr]]):
         handle_one_shot_ranges(self, itervars)
         fusion_log.debug(f"{lengths} {itervars}")
         return itervars
-    
+
     # TODO @bozhiyou this is ad hoc to fix rnumel == 1; should be no_r_dim if rnumel == 1
-    self.range_trees = [tree for tree in self.range_trees if tree.numel != 1]
+    self.range_trees = [tree for tree in self.range_trees if tree.numel != 1 or not tree.grid_dim is not None]
     # groups = [rt.numel for rt in self.range_trees]  # [:1] + self.reduction_range_trees]
     groups = [sympy.Integer(1) if (not self.inside_reduction and rt.is_loop) else
               rt.numel for rt in self.range_trees]
@@ -1082,7 +1092,7 @@ def split_and_set_ranges(self: TritonKernel, lengths: list[list[sympy.Expr]]):
     )
 
     last_tree = self.range_trees[-1]
-    rnumels = [rt.numel for rt in self.range_trees if rt.is_loop]
+    rnumels = [rt.numel for rt in self.range_trees if rt.is_loop or rt.grid_dim is None]
     # assert V.graph.sizevars.simplify(sympy_product(lengths[-1])) == V.graph.sizevars.simplify(new_ranges[-1][-1]), "TODO @bozhiyou store list of rnumels"
     new_rnumels = new_ranges[len(groups) - len(rnumels):]
     new_rnumels = list(itertools.chain.from_iterable(new_rnumels))

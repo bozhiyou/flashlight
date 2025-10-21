@@ -9,11 +9,11 @@ import torch
 from torch.testing import assert_close, make_tensor
 
 
-def alibi_bias(h, q_len, kv_len):
+def alibi_bias(h, q_len, kv_len, device='cuda'):
     return torch.exp2(
-            -((torch.arange(h, dtype=torch.int32, device=DEVICE) + 1) * 8.0 / h)
+            -((torch.arange(h, dtype=torch.int32, device=device) + 1) * 8.0 / h)
         )[:, None, None] * (
-            torch.arange(kv_len, dtype=torch.int32, device=DEVICE)[None, :] - torch.arange(q_len, dtype=torch.int32, device=DEVICE)[:, None])
+            torch.arange(kv_len, dtype=torch.int32, device=device)[None, :] - torch.arange(q_len, dtype=torch.int32, device=device)[:, None])
 
 def generate_alibi_bias_pytorch(nheads): return lambda q, k: alibi_bias(nheads, q, k)
 
@@ -37,7 +37,7 @@ def attention_pytorch_alibi(
     return attn_weight @ value
 
 
-def main():
+if __name__ == '__main__':
     # comment the line to disable the patch
     from monkeypatch.fusion import dependent_reduction_fusion
     from monkeypatch.fusion import block_reduction
@@ -84,6 +84,4 @@ def main():
     assert_close(o0[:, 0, :N_CTX//2, :HEAD_DIM//2], o1.to(torch.float32)[:, 0, :N_CTX//2, :HEAD_DIM//2])
     assert_close(o0[:, 1, N_CTX//2:, HEAD_DIM//2:], o1.to(torch.float32)[:, 1, N_CTX//2:, HEAD_DIM//2:])
 
-if __name__ == '__main__':
-    main()
     print("done")

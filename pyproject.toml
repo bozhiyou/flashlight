@@ -1,0 +1,25 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61.0"]
+
+[project]
+name = "flashlight"
+version = "2.5.0"
+dependencies = [
+    "torch==2.5.0",  # target specific version
+]
+
+# [project.optional-dependencies]
+# test = [
+#     "pytest"
+# ]
+
+# [tool.setuptools]
+# By default, setuptools only looks in 'src'
+# package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+# TODO By default, only find packages in the 'src' directory
+where = ["."]
+# Exclude the default tests directory from standard installs
+# exclude = ["tests*"]

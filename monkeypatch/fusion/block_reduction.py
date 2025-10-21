@@ -271,7 +271,7 @@ def _simplify_modular_indexing(indexing):
             },
         )
     return indexing.replace(ModularIndexing, _visitor)
-        
+
 
 # TODO @bozhiyou this main (debug) codegen loop can be staticmethod
 @monkey.patch(TritonScheduling)
@@ -394,6 +394,7 @@ def is_broadcasted(self: TritonKernel, index: sympy.Expr):
     """
     + fix use of entry.parent to entry.root
     + TODO @bozhiyou use total numel (ad hoc)
+    Originally, kernel's numels is used as output shape here
     """
     # Note. This may not be correct when there is indirect indexing
     if self.is_indirect_indexing(index):
@@ -431,7 +432,7 @@ def _sort_var_list_by_stride(var_list: list[sympy.Symbol]) -> dict[int, list[sym
 
 class RangeTreeExt:
     """Extends Inductor's "range tree" (IterationRangesRoot) for flexible, multi-dimensional tiling/blocking strategies.
-    
+
     Inductor linearizes/flattens multi-dimensional iteration space into a single, contiguous iteration space (e.g., an index space from 0 to M*N, iterated by a single block size).
     High-performance Triton kernels require explicit, multi-dimensional blocking.
 
@@ -505,7 +506,7 @@ class RangeTreeExt:
             self.block = sympy.Symbol(f"{self.range_tree.prefix.upper()}BLOCK{self.suffix}", integer=True, positive=True)
             self.offset = sympy_index_symbol(f"{self.range_tree.prefix}offset{self.suffix}")
             self.base = sympy_index_symbol(f"{self.range_tree.prefix}base{self.suffix}")
-        
+
         def __hash__(self):
             return hash(tuple(self.var_list))
 
@@ -627,14 +628,14 @@ class RangeTreeExt:
     def insert_range(self, i, *, numel, stride, var_list, suffix=''):
         self.ranges.insert(i, self.BlockedRange(self.range_tree, self,
                                                 numel=numel, stride=stride, var_list=var_list, suffix=suffix))
-    
-    
+
+
     def triton_tensor_ndim(self) -> int:
         """number of blocked dimensions"""
         if self.range_tree.tensor_dim is None:
             return 0
         return sum(1 for r in self.ranges if r.numel != 1 and r.block != 1)
-    
+
     def dense_size_list(self) -> list[str]:
         return [f"{r.block}" for r in self.ranges if r.block != 1]
 
@@ -818,7 +819,7 @@ def iteration_ranges_codegen_header(
                     # The following capping is not necessary since `x % (a*b) // a % b` = `x // a % b`
                     # code.writeline(f"{pid} = {self.kexpr(ModularIndexing(pid, 1, range.stride))}")
                     code.writeline(f"{ran9e.offset} = {self.kexpr(ran9e.pid * ran9e.block)}",)
-            
+
                     # lifted var def
                     for var in ran9e.var_list:
                         if entry.tensor_dim is not None:
@@ -848,7 +849,16 @@ def iteration_ranges_codegen_header(
 
 class IndexingVarOrder:
     """
-    order of vars represents the memory layout
+    order of vars represents the memory layout.
+
+    # var name prefix (f"{prefix}{n}")
+    - i: Loop IR pointwise indexing vars. The prefix is defined as `SymT.INDEX` in `torch.utils._sympy.symbol`.
+        `Loop` or subclass IR calls `self.inner_fn_args` -> `self._index` that constructs the vars.
+    - r: Loop IR reduction indexing vars. Similar but `SymT.RINDEX`.
+    - d: `extract_read_writes` from `torch._inductor.dependencies` uses "d" as prefix for IR node execution.
+    - z: `prefix="z"` when calling `dependencies.index_vars_no_squeeze` from `ComputedBuffer.simplify_and_reorder`.
+        It has nothing to do with the z grid dimension here. Rather, it's used for retrace the loop body with simplification and reordering applied.
+    - q: `prefix="q"` when calling `dependencies.index_vars_squeeze` from `ComputedBuffer.get_default_sizes_body`.
     """
     _index_order = {}
 
@@ -863,12 +873,18 @@ class IndexingVarOrder:
             if not v.is_Symbol:
                 if isinstance(v, ModularIndexing):
                     v = v.args[0]
-                else:
-                    assert len(v.free_symbols) == 1, f"{v}, {v.free_symbols}"
+                elif len(v.free_symbols) == 1:
                     v = next(iter(v.free_symbols))
+                else:
+                    # expression from induction variable elimination
+                    assert isinstance(v, sympy.Add), v
+                    coef = v.as_coefficients_dict()
+                    for var, coeff in sorted(coef.items(), key=lambda item: item[1]):
+                      vars.add(var)
+                    continue
             vars.add(v)
         cls._index_order[expr] = tuple(vars)
-    
+
     @classmethod
     def update(cls, expr, new_expr, replacements={}):
         if expr not in cls._index_order:
@@ -876,11 +892,11 @@ class IndexingVarOrder:
         replaced_vars = [(replacements[v] if v in replacements else v) for v in cls._index_order[expr]]
         cls.add(new_expr, replaced_vars)
         return True
-    
+
     @classmethod
     def get(cls, expr):
         return cls._index_order.get(expr)
-        
+
 
 
 @monkey.patch(ir.FixedLayout)
@@ -977,6 +993,10 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
         index_vars = (index,)
     elif vars:= IndexingVarOrder.get(index):
         index_vars = tuple(reversed(vars))
+        # add simplified index as key
+        simplified = self.simplify_indexing(index)
+        if index != simplified:
+            IndexingVarOrder.add(simplified, vars)
     else:
         # TODO REMOVE: this ordering is not stable
         assert all(len(arg.free_symbols) <= 1 for arg in index.args), f"{[arg.free_symbols for arg in index.args]}"
@@ -992,7 +1012,7 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
         if _is_one_shot(var, self):  # A "one-shot" range is a dimension that is not iterated over in a loop but is instead processed "all at once" within a single block (e.g., using tl.arange) (conceptually, when block == dense size of the dimension).
             var_to_blocked_dim[var] = next(dim)  # Assign it a unique block dimension.
             continue
-        
+
         # Get the extended range tree representation
         tree = self.range_tree_nodes[var].root
         treex: RangeTreeExt = getattr(tree, 'block_meta', None)
@@ -1025,6 +1045,57 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
     return var_to_blocked_dim
 
 
+def _simplify_subexpression(self: TritonKernel, index: sympy.Expr):
+    expr = self.simplify_indexing(index)  # V.graph.sizevars.simplify_with_ranges(index, self.var_ranges())
+    if not expr.has(FloorDiv) and not expr.has(ModularIndexing):
+        return expr
+
+    var_ranges = {k: v for k, v in self.var_ranges().items() if isinstance(k, sympy.Add)}
+    if not var_ranges:
+        return expr
+
+    def remove_zero_terms(base, divisor):
+        for v in var_ranges:
+            if base.has(v):
+                # var smaller than divisor can be removed
+                # if the rest is guaranteed to be multiple of divisor
+                rest = sympy.Wild("_rest", exclude=[v])
+                m = base.match(v + rest)
+                if m and not m[rest].has(v):
+                    gcd = sympy.gcd(m[rest], divisor)
+                    if gcd == divisor:
+                        if var_ranges[v] <= divisor:
+                            base = m[rest]
+        return base
+
+    def visit_indexing_div(base, divisor):
+        return FloorDiv(remove_zero_terms(base, divisor), divisor)
+
+    def visit_modular_indexing(base, divisor, modulus):
+        base = remove_zero_terms(base, divisor)
+        return ModularIndexing(base, divisor, modulus)
+
+    if expr.has(ModularIndexing):
+        expr = expr.replace(
+            ModularIndexing(
+                sympy.Wild("base", integer=True),
+                sympy.Wild("divisor", integer=True),
+                sympy.Wild("modulus", integer=True),
+            ),
+            visit_modular_indexing,
+        )
+
+    if expr.has(FloorDiv):
+        expr = expr.replace(
+            FloorDiv(
+                sympy.Wild("base", integer=True),
+                sympy.Wild("divisor", integer=True),
+            ),
+            visit_indexing_div,
+        )
+
+    return expr
+
 @monkey.patch(TritonKernel)
 def indexing(
     self: TritonKernel,
@@ -1049,12 +1120,15 @@ def indexing(
         var_to_blocked_dim = get_variable_to_block_dim_map(self, index)
         ndim = len(set(var_to_blocked_dim.values()))
 
+        index = _simplify_subexpression(self, index)
         var_ranges = self.var_ranges()
         if ndim <= 1:
             override_mask = ' & '.join(f"({var} < {var_ranges[var]})" for arg in index.args for var in arg.free_symbols)
         else:
             masks = []
-            for arg in (index.args or (index,)):  # `args` is ordered, `free_symbols` is not            
+            for arg in (index.args or (index,)):  # `args` is ordered, `free_symbols` is not
+                if not arg.free_symbols:  # constant offset
+                    continue
                 assert len(arg.free_symbols) == 1
                 var = next(iter(arg.free_symbols))
                 if var not in var_ranges:
@@ -1109,6 +1183,9 @@ def index_to_str(self: TritonKernel, index: sympy.Expr) -> str:
         return index_str
     args = []
     for arg in (index.args or (index,)):
+        if not arg.free_symbols:  # constant offset
+            args.append(f"{arg}")
+            continue
         assert len(arg.free_symbols) == 1
         var = next(iter(arg.free_symbols))
         if var not in var_to_blocked_dim:
@@ -1212,7 +1289,7 @@ def codegen_kernel(self: TritonKernel, name=None) -> str:
 
     if name is None:
         code.splice(gen_common_triton_imports())
-        code.splice("from monkeypatch.fusion import triton_heuristics")
+        code.splice("import monkeypatch.fusion.triton_heuristics")
 
         if config.benchmark_kernel:
             code.splice(self.imports_for_benchmark_kernel())
@@ -1333,7 +1410,7 @@ def codegen_kernel(self: TritonKernel, name=None) -> str:
         block = f"{tree.prefix.upper()}BLOCK{suffix}: tl.constexpr"
         if block not in argdefs:
             argdefs.append(block)
-        
+
     # for kernel fusion
     for arg, numel in getattr(self.args, 'constexprs', {}).items():
         inductor_meta['block_args'][arg] = numel
