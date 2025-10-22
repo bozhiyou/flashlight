@@ -1,12 +1,6 @@
-import argparse
 import collections
 import math
-import os
-from einops import rearrange
-from functools import lru_cache, partial
-import flash_attn.utils
-import flash_attn.utils.benchmark
-from typing import Optional, List, Literal, NamedTuple
+from typing import Literal
 
 import torch
 
@@ -95,9 +89,11 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
     start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     # Warm-up
-    for _ in range(n_warmup):
-        fn()
-    warmup_max(fn, n=n_warmup)
+    try:
+        warmup_max(fn, n=n_warmup)
+    except:
+        for _ in range(n_warmup):
+            fn()
     # Benchmark
     for i in range(n_repeat):
         # we don't want `fn` to accumulate gradient values
@@ -128,7 +124,7 @@ def benchmark_forward(
     repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs
 ):
     f"""
-    Shim for {flash_attn.utils.benchmark.benchmark_forward}, which includes CUDA synctime.
+    Shim for `flash_attn.utils.benchmark.benchmark_forward`, which includes CUDA synctime.
     Here we don't mesure CUDA sync time.
     """
     def amp_wrapper(*inputs, **kwinputs):

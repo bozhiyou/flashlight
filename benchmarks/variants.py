@@ -6,7 +6,6 @@ import argparse
 import collections
 import os
 from functools import lru_cache
-import flash_attn.utils.benchmark
 
 import torch._dynamo.config
 torch._dynamo.config.cache_size_limit = 65536
