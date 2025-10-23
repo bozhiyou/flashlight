@@ -85,28 +85,25 @@ def _blockreduction_configs(
     # from torch._inductor.kernel.flex_attention import _get_default_config_fwd
     # (BLOCK_M, BLOCK_N, num_warps, num_stages)
     configs: list[tuple[int, int, int, int]] = [
-        (16, 64, 4, 2),
-        (16, 64, 4, 3),
-        (16, 64, 8, 2),
-        (32, 64, 4, 2),
-        (32, 64, 4, 3),
-        (32, 64, 8, 2),
+        # (16, 64, 4, 2),
+        # (16, 64, 4, 3),
+        # (16, 64, 8, 2),
+        # (32, 64, 4, 2),
+        # (32, 64, 4, 3),
+        # (32, 64, 8, 2),
         (64, 64, 4, 2),
         (64, 64, 4, 3),
-        (64, 64, 8, 2),
         (128, 64, 4, 3),
-        (128, 64, 4, 3),
-        (128, 64, 8, 3)
-    ]  # TODO @bozhiyou default to max or 1?
+        (128, 64, 8, 3),
+        (128, 128, 4, 3),
+        (128, 128, 8, 3),
+    ]  # TODO @bozhiyou config based on device cc
     # configs = [(x, r, w, s) for x in (128, 64) for r in (16, 32, 64, 128) for w in (4, 8) for s in (2, 3)]
     # configs.append(_get_default_config_fwd(query))
     if torch._inductor.config.max_autotune:
         configs += [
-            (128, 64, 4, 3),
-            (128, 128, 4, 3),
-            (128, 128, 8, 2),
             (64, 128, 4, 3),
-            (64, 64, 4, 3),
+            (64, 128, 8, 3),
         ]
 
     if 'block_args' in inductor_meta:

@@ -1,5 +1,6 @@
 # Dependencies
 ```
+python>3.10     # monkey-patching `contextlib.contextmanager` requires `co_qualname` field of `PyCodeObject` introduced in Python 3.11 (bpo-44530)
 torch==2.5.0    # which requires 'python<3.13'
 numpy           # optional; torch raises `UserWarning: Failed to initialize NumPy: No module named 'numpy'`
 ```
