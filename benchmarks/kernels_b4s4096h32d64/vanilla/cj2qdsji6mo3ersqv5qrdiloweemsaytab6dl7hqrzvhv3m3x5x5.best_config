@@ -1,0 +1,1 @@
+{"XBLOCK": [[4096, 32]], "xnumbl0": 32, "XBLOCK0": 128, "RBLOCK": 64, "num_warps": 4, "num_stages": 3, "configs_hash": "f1155c36ab761e54ce6eacfdc53aed82575fca498cc96194ac96fb13763174b1", "found_by_coordesc": false, "time_taken_ms": 1236}
