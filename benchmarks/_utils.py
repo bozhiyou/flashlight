@@ -116,12 +116,14 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
         if len(ret) == 1:
             ret = ret[0]
         return ret
+    if return_mode is None:
+        return [times.item()] if len(ret) == 1 else times.tolist()
     return getattr(torch, return_mode)(times).item()
 
 
 def benchmark_forward(
     fn, *inputs,
-    repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs
+    repeats=10, return_mode='mean', desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs
 ):
     f"""
     Shim for `flash_attn.utils.benchmark.benchmark_forward`, which includes CUDA synctime.
@@ -133,7 +135,7 @@ def benchmark_forward(
 
     return do_bench(
         (lambda: amp_wrapper(*inputs, **kwinputs)) if amp else (lambda: fn(*inputs, **kwinputs)),
-        rep=repeats, return_mode='median'
+        rep=repeats, return_mode=return_mode
     )
 
 
@@ -178,14 +180,11 @@ def efficiency(flop: int, time: float, unit: Literal['s', 'ms'] = 's') -> float:
 ###########
 
 SHOULD_VERIFY = False
-def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv):
+def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv, return_mode='mean'):
     args = make_qkv(config, attention_name)
     target = lambda: attention_func(*args)
-    # warmup
-    for _ in range(5):
-        target()
 
-    time_f = benchmark_forward(attention_func, *args) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
+    time_f = benchmark_forward(attention_func, *args, return_mode=return_mode) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
     # print("bmk: ", benchmarker.benchmark_gpu(target))
     # print("bmk: ", benchmarker.benchmark_gpu(target))
     # print("bmk: ", benchmarker.benchmark_gpu(target))
