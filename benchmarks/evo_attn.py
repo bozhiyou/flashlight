@@ -121,6 +121,7 @@ def main(args, benchmark_registry):
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     torch.manual_seed(0)
+    torch._inductor.config.max_autotune = True  # enable autotune
     ##################
     # configurations
     ##################
