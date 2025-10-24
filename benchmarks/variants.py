@@ -1,6 +1,5 @@
 """
 examples: https://github.com/pytorch-labs/attention-gym/tree/6a65742f/examples/benchmark.py#L29-L41
-configs: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L74-L78
 """
 import argparse
 import collections
@@ -236,16 +235,27 @@ if __name__ == "__main__":
     ##################
     # configurations
     ##################
-    DEFAULT_CONFIGS = {
+    # https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L74-L78
+    FLASH_CONFIGS = {
         "batch_sizes": [32, 16, 8, 4, 2, 1],
         "seq_lengths": [512, 1024, 2048, 4096, 8192, 16384],
         "head_dims": [64, 128],
-        # "head_dims": [128],
+        "model_dim": 2048,
         "causal": [False],
         "dropout_p": 0.0,
     }
-    DEFAULT = DEFAULT_CONFIGS
-    DEFAULT_MODEL_DIM = 2048
+    # https://arxiv.org/pdf/2412.05496
+    FLEX_CONFIGS = {
+        "batch_sizes": [64, 16, 4, 1],
+        # "batch_sizes": [32],
+        "seq_lengths": [1024, 4096, 16384, 65536],
+        "head_dims": [64],
+        "model_dim": 1024,  # 16 heads
+        "causal": [False],
+        "dropout_p": 0.0,
+    }
+    DEFAULT = FLEX_CONFIGS
+    DEFAULT_MODEL_DIM = DEFAULT['model_dim']
     parser = argparse.ArgumentParser(description="Attention Benchmark")
     parser.add_argument("--implementations", type=str, nargs="+", default=["all"], help="List of implementations to benchmark")
     parser.add_argument("--batch_size", type=int, nargs="+", default=DEFAULT["batch_sizes"], help="Batch size")
