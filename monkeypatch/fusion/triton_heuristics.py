@@ -123,6 +123,8 @@ def _blockreduction_configs(
         def block_config(xblock, rblock):
             block = {'x': xblock, 'r': rblock}
             c = {"XBLOCK": ()}
+            if inductor_meta['_has_RBLOCK']:  # patch legacy RBLOCK
+                c["RBLOCK"] = rblock
             for arg, v in block_hints.items():
                 if 'numbl' in arg:
                     prefix, suffix = arg.split('numbl')
@@ -140,7 +142,7 @@ def _blockreduction_configs(
             triton.Config({  # keys must be kernel args
                 **block_config(XBLOCK, RBLOCK),
                 # "XBLOCK": inductor_meta['block_args']["xnumel"],  # force XBLOCK to 1 to recalculate number of blocks
-                "RBLOCK": RBLOCK,
+                # "RBLOCK": RBLOCK,
             }, num_stages=num_stages, num_warps=num_warps)
             for (XBLOCK, RBLOCK, num_warps, num_stages) in configs
         ]

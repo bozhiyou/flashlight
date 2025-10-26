@@ -735,6 +735,33 @@ def iteration_ranges_ranges_code(self: TritonKernel, entry, block_size=''):
     return f"tl.arange(0, {block_size}){convert}"
 
 
+
+@monkey.patch(ir.View)
+def make_loader(self):
+    """ranges now don't have size/shape; maintain shape in View (resulted from e.g. unsqueeze)"""
+    inner = self.data.make_loader()
+    reindex = self.make_reindexer()
+
+    def loader(idx):
+        idx_old = reindex(idx)
+        loaded = inner(idx_old)
+
+        s, l = (idx_old, idx) if len(idx_old) < len(idx) else (idx, idx_old)
+        if all(i in s or i == sympy.S.Zero for i in l):
+            # queeze/unsqueeze
+            axis = [':' if i in s else None for i in l]
+            if None in axis[-2:]:  # TODO @bozhiyou ad hoc for 2D mm
+                return ops.unsqueeze(loaded, axis[-2:])
+        return loaded
+
+    return loader
+
+@monkey.patch(TritonKernelOverrides)
+@staticmethod
+def unsqueeze(x, dimensions):
+    return f"{x}[{', '.join(map(str, dimensions))}]"
+
+
 def add_constexpr(self: TritonKernel, key, value) -> None:
     constexpr = getattr(self, 'constexpr', {})
     if not constexpr:
@@ -1253,6 +1280,8 @@ def _get_heuristic(self: TritonKernel):
 def codegen_kernel(self: TritonKernel, name=None) -> str:
     """
     - range without tensor_dim may still need BLOCK, e.g. if is_loop
+    + inductor_meta['block_args']
+    + inductor_meta['_has_RBLOCK'] True if legacy RBLOCK is in the kernel args
     """
     from torch._inductor import config
     from torch._inductor.codegen.common import WorkspaceArg
@@ -1385,6 +1414,7 @@ def codegen_kernel(self: TritonKernel, name=None) -> str:
 
     self.triton_meta = triton_meta
 
+    inductor_meta['_has_RBLOCK'] = any('RBLOCK' in a for a in argdefs)
     inductor_meta['block_args'] = {}
     for tree in self.range_trees:
         if tree.prefix == "r" and (self.persistent_reduction or not self.inside_reduction):

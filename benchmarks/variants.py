@@ -22,34 +22,18 @@ Result = collections.namedtuple('Result',
 
 
 ###########
-# targets
+# FlexAttention and its benchmark helpers (attention-gym)
 ###########
 
-
-try:
-    import flash_attn
-    from flash_attn import flash_attn_qkvpacked_func
-except ImportError:
-    flash_attn_qkvpacked_func = None
-
-try:
-    import triton
-    from triton.ops.flash_attention import attention as attention_triton
-except ImportError:
-    attention_triton = None
-
-try:
-    import xformers.ops as xops
-except ImportError:
-    xops = None
+from torch.nn.attention.flex_attention import flex_attention
+flex_attention = torch.compile(flex_attention, dynamic=False)
 
 # Flex attention related mask and modification functions
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
-    create_block_mask,
-    create_mask,
-    flex_attention,
     _identity,
+    create_mask,
+    create_block_mask,
     _score_mod_signature,
     _mask_mod_signature,
 )
@@ -59,40 +43,57 @@ def create_block_mask_cached(mask_mod, B, H, M, N, device="cuda"):
     block_mask = create_block_mask(mask_mod, B, H, M, N, device=device)
     return block_mask
 
-flex_attention = torch.compile(flex_attention, dynamic=False)
-try:
-    from attn_gym.masks import (
-        causal_mask,
-        generate_sliding_window,
-        generate_prefix_lm_mask,
-        generate_doc_mask_mod,
+from attn_gym.mods import (
+    generate_alibi_bias,
+    generate_tanh_softcap
+)
 
-    )
-    from attn_gym.mods import (
-        generate_alibi_bias,
-        generate_tanh_softcap
-    )
-except ImportError:
-    print("attn_gym IMPORT ERROR")
-    def causal_mask(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
-    def generate_sliding_window(window_size): return lambda b, h, q, k: torch.tril(torch.ones(q, k), diagonal=window_size)
-    def generate_prefix_lm_mask(prefix_length): return lambda b, h, q, k: torch.tril(torch.ones(q, k), diagonal=prefix_length)
-    def generate_doc_mask_mod(b, h, q, k): return torch.ones((b, h, q, k), device="cuda", dtype=torch.bool)
-    def generate_alibi_bias(nheads): return lambda s, a, q, k: s - torch.arange(nheads, device="cuda").view(1, -1, 1, 1)
-    def generate_tanh_softcap(cap, approx): return lambda s, a, q, k: cap * torch.tanh(s / cap)
+from attn_gym.masks import (
+    causal_mask,
+    generate_sliding_window,
+    generate_prefix_lm_mask,
+    document_mask
+)
 
+def generate_doc_mask_mod(max_seq_len: int, num_docs: int = 12):
+    """https://github.com/meta-pytorch/attention-gym/blob/6a65742f/examples/benchmark.py#L201-L220"""
+    import random
+
+    random.seed(0)
+
+    def generate_random_lengths(total_length, num_documents):
+        # Initialize all lengths to 1 to ensure each document has at least one token
+        lengths = [1] * num_documents
+        remaining_length = total_length - num_documents
+
+        # Randomly distribute the remaining length
+        for _ in range(remaining_length):
+            index = random.randint(0, num_documents - 1)
+            lengths[index] += 1
+
+        return lengths
+
+    lengths = generate_random_lengths(max_seq_len, num_docs)
+    offsets = document_mask.length_to_offsets(lengths, "cuda")
+    document_causal_mask = document_mask.generate_doc_mask_mod(causal_mask, offsets)
+    return document_causal_mask
+
+
+# -- Flashlight --
 
 ENABLE_FLASHLIGHT = False
 def apply_patch():
     global ENABLE_FLASHLIGHT
-    from monkeypatch import disable_flashattention_replacement
     from monkeypatch.fusion import dependent_reduction_fusion
     from monkeypatch.fusion import block_reduction
     from monkeypatch.fusion import reduction_kernel_fusion
     ENABLE_FLASHLIGHT = True
+    # TorchDynamo, the frontend, detects static attention subgraph and replace it with FlashAttention
+    # disable the replacement to enjoy Flashlight generated fused attention
+    from monkeypatch import disable_flashattention_replacement
     disable_flashattention_replacement()
     print("FLASHLIGHT enabled")
-apply_patch()
+# apply_patch()
 
 
 from tests.test_vanilla import attention_pytorch
@@ -104,8 +105,7 @@ attention_pytorch_alibi = torch.compile(dynamic=False)(attention_pytorch_alibi)
 from tests.test_softcap import attention_softcapped
 attention_softcapped = torch.compile(dynamic=False)(attention_softcapped)
 
-
-from tests.test_causal import attention_pytorch_causal, get_causal_mask
+from tests.test_causal import attention_pytorch_causal
 attention_pytorch_causal = torch.compile(dynamic=False)(attention_pytorch_causal)
 
 from tests.test_sliding_window import attention_pytorch_sliding_window, get_sliding_mask
@@ -114,16 +114,14 @@ attention_pytorch_sliding_window = torch.compile(dynamic=False)(attention_pytorc
 from tests.test_prefix_lm import attention_pytorch_prefix_lm, get_prefix_lm_mask
 attention_pytorch_prefix_lm = torch.compile(dynamic=False)(attention_pytorch_prefix_lm)
 
+from tests.test_document_mask import attention_pytorch_document_mask, create_document_id
+attention_pytorch_document_mask = torch.compile(dynamic=False)(attention_pytorch_document_mask)
 
 
-
-
-
-# flex-able benchmarks
-# 'qkv' in name uses packed qkv input
+# Flex-able benchmarks from https://github.com/pytorch-labs/attention-gym/tree/6a65742f/examples/benchmark.py#L29-L41
 ATTENTION_REGISTRY = {
     "full": lambda q, k, v: attention_pytorch(
-        q, k, v,# dropout_p=dropout_p#, is_causal=causal
+        q, k, v
     ),
     "flex_full": lambda q, k, v: flex_attention(q, k, v, score_mod=_identity),
 
@@ -136,15 +134,10 @@ ATTENTION_REGISTRY = {
     ),
     "flex_full_with_softcap": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=False)),
 
-    # "full_with_softcap_approx": lambda q, k, v: attention_softcap_approx(
-    #     q, k, v, tahn_fnc=generate_tanh_softcap(30, approx=False) # dropout_p=dropout_p#, is_causal=causal
-    # ),
-    # "flex_full_with_softcap_approx": lambda q, k, v: flex_attention(q, k, v, score_mod=generate_tanh_softcap(30, approx=True)),
-
-    # "full_with_causal": lambda q, k, v: attention_pytorch_causal(
-    #     q, k, v, attn_mask=get_causal_mask(q.shape[-2], k.shape[-2], "cuda")# dropout_p=dropout_p#, is_causal=causal
-    # ),
-    # "flex_full_with_causal": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
+    "full_with_causal": lambda q, k, v: attention_pytorch_causal(
+        q, k, v
+    ),
+    "flex_full_with_causal": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0), H=q.size(1), M=q.size(2), N=k.size(2))),
 
     "full_with_sliding_window": lambda q, k, v: attention_pytorch_sliding_window(
         q, k, v, window_size=256, attn_mask=get_sliding_mask(q, 256), # dropout_p=dropout_p#, is_causal=causal
@@ -156,10 +149,11 @@ ATTENTION_REGISTRY = {
     ),
     "flex_full_with_prefix_lm": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256),B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2))),
     
-    # "full_with_document": lambda q, k, v: attention_pytorch_with_document(
-    #     q, k, v,# dropout_p=dropout_p#, is_causal=causal
-    # ),
-
+    "full_with_document_mask": lambda q, k, v: attention_pytorch_document_mask(
+        q, k, v, document_id=create_document_id(q.size(0), q.size(2), num_docs=12)
+    ),
+    "flex_full_with_document_mask": lambda q, k, v: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_doc_mask_mod(max_seq_len=q.size(2), num_docs=12), B=q.size(0), H=q.size(1), M=q.size(2), N=k.size(2))),
+    
 }
 
 from _utils import AttentionConfig as Config, run_benchmark, run_test
