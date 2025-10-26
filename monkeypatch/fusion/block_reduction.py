@@ -1026,6 +1026,7 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
             IndexingVarOrder.add(simplified, vars)
     else:
         # TODO REMOVE: this ordering is not stable
+        index = _simplify_subexpression(self, index)
         assert all(len(arg.free_symbols) <= 1 for arg in index.args), f"{[arg.free_symbols for arg in index.args]}"
         index_vars = tuple(var for arg in index.args for var in arg.free_symbols)  # `args` is (kind of) ordered; `free_symbols` is not
 
@@ -1144,11 +1145,11 @@ def indexing(
     Combine and Override: The individual N-dimensional masks are combined with a logical AND (&). The resulting string is then passed as the override_mask to the original indexing implementation, which proceeds with the rest of the code generation.
     """
     if override_mask is None:
+        var_ranges = self.var_ranges()
         var_to_blocked_dim = get_variable_to_block_dim_map(self, index)
         ndim = len(set(var_to_blocked_dim.values()))
 
         index = _simplify_subexpression(self, index)
-        var_ranges = self.var_ranges()
         if ndim <= 1:
             override_mask = ' & '.join(f"({var} < {var_ranges[var]})" for arg in index.args for var in arg.free_symbols)
         else:

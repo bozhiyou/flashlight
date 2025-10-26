@@ -31,6 +31,15 @@ def attention_pytorch_causal(
     # L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
 
+    if enable_gqa:
+        # Reshape query to align with groups
+        # (N, Hq, L, E) -> (N, Hk, num_groups, L, E)
+        query = query.view(query.size(0), key.size(1), -1, query.size(-2), query.size(-1))
+        # (N, Hk, S, E) -> (N, Hk, 1, S, E)
+        key = key.unsqueeze(2)
+        # (N, Hk, S, Ev) -> (N, Hk, 1, S, Ev)
+        value = value.unsqueeze(2)
+
     mask = torch.triu(torch.ones(query.size(-2), key.size(-2), device=query.device, dtype=torch.bool), diagonal=1)
     attn_weight = torch.where(mask, float('-inf'), query @ key.transpose(-2, -1) * scale_factor)
 

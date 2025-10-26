@@ -33,36 +33,28 @@ def grouped_query_attention(
     # L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
 
-    # Get head dimensions
-    N, Hq, L, E = query.shape
-    _N, Hk, S, _E = key.shape
-    _N, Hk, S, Ev = value.shape
-
-    num_groups = Hq // Hk
-
     # Reshape query to align with groups
     # (N, Hq, L, E) -> (N, Hk, num_groups, L, E)
-    query = query.view(N, Hk, num_groups, L, E)
-
+    query = query.view(query.size(0), key.size(1), -1, query.size(-2), query.size(-1))
     # (N, Hk, S, E) -> (N, Hk, 1, S, E)
-    key_g = key.unsqueeze(2)
+    key = key.unsqueeze(2)
     # (N, Hk, S, Ev) -> (N, Hk, 1, S, Ev)
-    value_g = value.unsqueeze(2)
+    value = value.unsqueeze(2)
 
     # Calculate attention weights
     # (N, Hk, num_groups, L, E) @ (N, Hk, 1, E, S) -> (N, Hk, num_groups, L, S)
-    attn_weight = (query @ key_g.transpose(-2, -1)) * scale_factor
+    attn_weight = (query @ key.transpose(-2, -1)) * scale_factor
     
     attn_weight = torch.softmax(attn_weight, dim=-1)
     # attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
 
     # Apply attention weights to values
     # (N, Hk, num_groups, L, S) @ (N, Hk, 1, S, Ev) -> (N, Hk, num_groups, L, Ev)
-    output = attn_weight @ value_g
+    output = attn_weight @ value
 
     # Reshape output back to original query head dimension
     # (N, Hk, num_groups, L, Ev) -> (N, Hq, L, Ev)
-    return output.view(N, Hq, L, Ev)
+    return output.view(value.size(0), -1, value.size(-2), value.size(-1))
 
 
 if __name__ == '__main__':
@@ -73,12 +65,12 @@ if __name__ == '__main__':
     from monkeypatch.fusion import reduction_kernel_fusion
 
     from torch.testing import assert_close, make_tensor
-    DEVICE = torch.device("cuda:0")
-    BATCH = 2
-    HEAD_Q = 8       # Query heads
+    DEVICE = torch.device("cuda")
+    BATCH = 32
+    HEAD_Q = 16       # Query heads
     HEAD_KV = 2      # Key/Value heads (must divide HEAD_Q)
     N_CTX = 4*1024
-    HEAD_DIM = 128
+    HEAD_DIM = 64
     DTYPE = torch.bfloat16
 
     # Ensure query heads is a multiple of key/value heads
@@ -99,7 +91,7 @@ if __name__ == '__main__':
         k.to(torch.float32), 
         v.to(torch.float32), 
     )
-    o1 = torch.compile(grouped_query_attention)(q, k, v)
+    o1 = torch.compile(dynamic=False)(grouped_query_attention)(q, k, v)
     
     assert_close(o0, o1.to(torch.float32), atol=1e-2, rtol=1e-2)
 

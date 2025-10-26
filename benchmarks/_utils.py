@@ -11,7 +11,7 @@ import torch
 
 input_dtype = torch.bfloat16  # TODO add to config
 
-def _nflop(batch: int, seqlen: int, headdim: int, nheads: int, causal: bool,
+def attention_nflop(batch: int, seqlen: int, headdim: int, nheads: int, causal: bool = False,
         mode: Literal["fwd", "bwd", "fwd_bwd"] = "fwd"
     ) -> float:
     """Calculate FLOPS for attention computation."""
@@ -20,12 +20,7 @@ def _nflop(batch: int, seqlen: int, headdim: int, nheads: int, causal: bool,
 
 
 Config = collections.namedtuple('Config',
-    ['batch_size', 'seqlen', 'nheads', 'headdim', 'causal', 'dropout_p'])
-
-class AttentionConfig(Config):
-    def nflop(self, mode: Literal["fwd", "bwd", "fwd_bwd"] = "fwd") -> float:
-        """Calculate FLOPS for attention computation. Static to given config."""
-        return _nflop(self.batch_size, self.seqlen, self.headdim, self.nheads, self.causal, mode=mode)
+    ['batch_size', 'seqlen', 'nheads', 'headdim', 'group_size', 'dropout_p'])
 
 
 ##################
@@ -152,24 +147,35 @@ def torch_order(qkv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Te
     return q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous()
 
 def _make_qkv(config, attention_name):
-    batch_size, seqlen, nheads, headdim, causal, dropout_p = config
+    batch_size, seqlen, nheads, headdim, group_size, dropout_p = config
+    if nheads % group_size != 0 or group_size > nheads:
+        raise ValueError(
+            f"Expect number of query heads to be a multiple of kv heads for GQA "
+            f"Cannot divide Hq={nheads} into groups of {group_size}."
+        )
+    enable_gqa = group_size != 1
     
     device: str = "cuda"
     mode: Literal["fwd", "bwd", "fwd_bwd"] = "fwd"
-    qkv = torch.randn(batch_size, seqlen, 3, nheads, headdim, device=device, dtype=input_dtype, requires_grad='bwd' in mode)
-    args = (qkv,) if "qkv" in attention_name else torch_order(qkv)
-
-    return args
+    if not enable_gqa:
+        qkv = torch.randn(batch_size, seqlen, 3, nheads, headdim, device=device, dtype=input_dtype, requires_grad='bwd' in mode)
+        args = (qkv,) if "qkv" in attention_name else torch_order(qkv)
+        return args
+    return (
+        torch.randn(batch_size, nheads, seqlen, headdim, device=device, dtype=input_dtype, requires_grad='bwd' in mode),
+        torch.randn(batch_size, nheads // group_size, seqlen, headdim, device=device, dtype=input_dtype, requires_grad='bwd' in mode),
+        torch.randn(batch_size, nheads // group_size, seqlen, headdim, device=device, dtype=input_dtype, requires_grad='bwd' in mode),
+    )
 
 
 ################
 # metrics
 ################
 
-def efficiency(flop: int, time: float, unit: Literal['s', 'ms'] = 's') -> float:
+def efficiency(flop: int, time: float, time_unit: Literal['s', 'ms'] = 'ms') -> float:
     """TFLOP/s"""
     assert time
-    scalar = {'s': 1e12, 'ms': 1e9}[unit]
+    scalar = {'s': 1e12, 'ms': 1e9}[time_unit]
     return (flop / time / scalar) if not math.isnan(time) else 0.0
 
 
@@ -179,49 +185,27 @@ def efficiency(flop: int, time: float, unit: Literal['s', 'ms'] = 's') -> float:
 # Interface
 ###########
 
-SHOULD_VERIFY = False
 def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv, return_mode='mean'):
     args = make_qkv(config, attention_name)
-    target = lambda: attention_func(*args)
 
-    time_f = benchmark_forward(attention_func, *args, return_mode=return_mode) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
-    # print("bmk: ", benchmarker.benchmark_gpu(target))
-    # print("bmk: ", benchmarker.benchmark_gpu(target))
-    # print("bmk: ", benchmarker.benchmark_gpu(target))
+    time_f = benchmark_forward(attention_func, *args, return_mode=return_mode, enable_gqa=config.group_size != 1) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
     # Calculate TFLOPS
-    tflops_fwd = efficiency(flops, time_f)
+    tflops_fwd = efficiency(flops, time_f, time_unit='ms')
     # tfps_bwd = efficiency(flop_bwd, time_b)
-
-    # === Correctness check ===
-    if SHOULD_VERIFY and not attention_name.startswith("full"):
-        # ref_name = "full"
-        ref_name = attention_name.replace("flex_", "")
-        print(f"verify with {ref_name}")
-        ref_func = ATTENTION_REGISTRY.get(ref_name, None)
-        if ref_func is not None:
-            with torch.no_grad():
-                out_ref = ref_func(q, k, v)
-                out_test = attention_func(q, k, v)
-            try:
-                torch.testing.assert_close(out_test, out_ref, rtol=1e-2, atol=1e-2)
-            except AssertionError as e:
-                print(f"❌ {attention_name} failed correctness check vs {ref_name}:\n{e}")
-            else:
-                print(f"✅ {attention_name} passed correctness check vs {ref_name}")
 
     return time_f, tflops_fwd
 
 
 def run_test(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv):
     args = make_qkv(config, attention_name)
-    target = lambda: attention_func(*args)
+    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1)
 
     target()
 
 
 def run_torch_profiler(config, attention_name: str, attention_func,  *, flops: int = 0, make_qkv=_make_qkv):
     args = make_qkv(config, attention_name)
-    target = lambda: attention_func(*args)
+    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1)
 
     from torch.profiler import profile, ProfilerActivity
     import json
