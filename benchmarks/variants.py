@@ -108,7 +108,7 @@ attention_softcapped = torch.compile(dynamic=False)(attention_softcapped)
 from tests.test_causal import attention_pytorch_causal
 attention_pytorch_causal = torch.compile(dynamic=False)(attention_pytorch_causal)
 
-from tests.test_sliding_window import attention_pytorch_sliding_window, get_sliding_mask
+from tests.test_sliding_window import attention_pytorch_sliding_window
 attention_pytorch_sliding_window = torch.compile(dynamic=False)(attention_pytorch_sliding_window)
 
 from tests.test_prefix_lm import attention_pytorch_prefix_lm, get_prefix_lm_mask
@@ -140,7 +140,7 @@ ATTENTION_REGISTRY = {
     "flex_full_with_causal": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0), H=q.size(1), M=q.size(2), N=k.size(2)), **kwargs),
 
     "full_with_sliding_window": lambda q, k, v, **kwargs: attention_pytorch_sliding_window(
-        q, k, v, window_size=256, attn_mask=get_sliding_mask(q, 256), **kwargs
+        q, k, v, window_size=256, **kwargs
     ),
     "flex_full_with_sliding_window": lambda q, k, v, **kwargs: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2)), **kwargs),
     
