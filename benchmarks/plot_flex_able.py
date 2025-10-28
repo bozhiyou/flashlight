@@ -6,7 +6,7 @@ from matplotlib.ticker import ScalarFormatter
 import sys
 
 
-def load_and_prepare_data(ours_csv="all.csv", flex_csv="all_flex.csv"):
+def load_and_prepare_data(ours_csv, flex_csv):
     """
     Loads and preprocesses the benchmark data from CSV files.
     """
@@ -294,12 +294,24 @@ def main():
         type=str,
         choices=['line', 'bar'],
         default='bar',
-        help="Type of plot to generate ('line' or 'bar'). Default is 'line'."
+        help="Type of plot to generate ('line' or 'bar'). Default is 'bar'."
+    )
+    parser.add_argument(
+        '--flex',
+        type=str,
+        default='all_flex.csv',
+        help="CSV file containing all FlexAttention results. Default is 'all_flex.csv'."
+    )
+    parser.add_argument(
+        '--flashlight',
+        type=str,
+        default='all.csv',
+        help="CSV file containing all Flashlight results. Default is 'all.csv'."
     )
     args = parser.parse_args()
 
     # Load and process data
-    combined_df, speedup_df, benchmarks = load_and_prepare_data()
+    combined_df, speedup_df, benchmarks = load_and_prepare_data(args.flashlight, args.flex)
 
     # Generate the chosen plot
     if args.plot == 'line':
