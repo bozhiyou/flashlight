@@ -9,7 +9,7 @@ import torch
 import math
 
 
-def diffattn(q, k, v, scale=None, lambda_full=0.2):
+def diffattn(q, k, v, scale=None, lambda_full=0.2, **kwargs):
     """
     q (bsz, 2 * self.num_heads, tgt_len, head_dim)
     k (bsz, 2 * self.num_kv_heads, self.head_dim, src_len)

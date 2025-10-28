@@ -46,7 +46,7 @@ BENCHMARK_REGISTRY = {
 }
 
 
-from _utils import AttentionConfig as Config, run_benchmark, run_test
+from _utils import Config, run_benchmark, run_test
 
 class SubList(list):
     """Hierarchical list for result collection."""
@@ -62,15 +62,15 @@ class SubList(list):
 
 def main(args, benchmark_registry):
     all_results = SubList()
-    for causal in args.causal:
+    for group_size in [1]:
         for headdim in args.headdim:
             for batch_size, seqlen in zip(args.batch_size, args.seqlen):
                 nheads = args.dim // headdim
-                config = Config(batch_size, seqlen, nheads, headdim, causal, args.dropout_p)
+                config = Config(batch_size, seqlen, nheads, headdim, group_size, args.dropout_p)
                 # config = Config(4, 4096, 32, 64, False, 0.0)
                 print(f"### Config: {config} ###")
                 # Calculate FLOPS
-                flop_fwd = config.nflop(mode="fwd")
+                # flop_fwd = TODO
                 # flop_bwd = flops(batch_size, seqlen, headdim, nheads, causal, mode="bwd")
 
                 # run_test(config, 'diffattn', multihead_diffattn.diffattn, flops=flop_fwd, make_qkv=multihead_diffattn.make_input)
@@ -94,7 +94,7 @@ def main(args, benchmark_registry):
                     # continue
 
                     try:
-                        res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, make_qkv=test_diffattn.make_input)
+                        res = run_benchmark(config, attention_name, attention_func, flops=-1, make_qkv=test_diffattn.make_input)
                     except:
                         res = (float('nan'), float('nan'))
                     result = Result(attention_name, *res)
@@ -120,6 +120,7 @@ def main(args, benchmark_registry):
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     torch.manual_seed(0)
+    import torch._inductor.config
     torch._inductor.config.max_autotune = True  # enable autotune
     ##################
     # configurations
@@ -140,10 +141,8 @@ if __name__ == "__main__":
     parser.add_argument("--seqlen", type=int, nargs="+", default=DEFAULT["seq_lengths"], help="Sequence length")
     parser.add_argument("--dim", type=int, default=DEFAULT_MODEL_DIM, help="Input dimension")
     parser.add_argument("--headdim", type=int, nargs="+", default=DEFAULT["head_dims"], help="Head dimension")
-    parser.add_argument("--causal", action=argparse.BooleanOptionalAction, help="Use causal attention")
     parser.add_argument("--dropout_p", type=float, default=DEFAULT["dropout_p"], help="Dropout probability")
     parser.add_argument("--skip_correctness", action="store_true", help="Skip correctness checks")
     args = parser.parse_args()
-    args.causal = [args.causal] if args.causal is not None else DEFAULT["causal"]
 
     main(args, BENCHMARK_REGISTRY)

@@ -18,11 +18,13 @@ from torch.nn import functional as F
 # from deepspeed.ops.deepspeed4science import DS4Sci_EvoformerAttention
 
 def attention_reference(
-        q_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
-        k_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
-        v_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
-        biases: List[torch.Tensor],
-        sm_scale: Optional[float] = None) -> torch.Tensor:
+    q_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
+    k_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
+    v_input: torch.Tensor,  # [*, Dim_Q, H, C_hid]
+    biases: List[torch.Tensor],
+    sm_scale: Optional[float] = None,
+    **kwargs
+) -> torch.Tensor:
     # Original shape: [*, Dim_Q, H, C_hid] -> Transpose to: [*, H, Dim_Q, C_hid]
     q = q_input.transpose(-2, -3)
     k = k_input.transpose(-2, -3)
