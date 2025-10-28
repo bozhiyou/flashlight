@@ -57,7 +57,7 @@ for i, benchmark in enumerate(benchmarks):
         ax=ax1,
         palette={"Ours": "blue", "Base": "green"},
         # linestyle="-",
-        dashes={"(32, 64)": (3, 2), "(16, 128)": (), '(4, 32)': ()},
+        dashes={"(32, 64)": (3, 2), "(16, 128)": (), '(4, 32)': (), '(4, 64)': (), '(4, 128)': ()},
     )
     ax1.set_xlabel("(Batch Size, Sequence Length)")
     ax1.set_ylabel("Time (ms)")
@@ -79,7 +79,7 @@ for i, benchmark in enumerate(benchmarks):
         style="nheads_headdim",
         # linestyle=":",
         # color="red",
-        dashes={"(32, 64)": (3, 2), "(16, 128)": (), '(4, 32)': ()},
+        dashes={"(32, 64)": (3, 2), "(16, 128)": (), '(4, 32)': (), '(4, 64)': (), '(4, 128)': ()},
         ax=ax2)
     ax2.set_ylabel("Speedup")
 
