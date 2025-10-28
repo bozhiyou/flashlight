@@ -137,22 +137,22 @@ ATTENTION_REGISTRY = {
     "full_with_causal": lambda q, k, v, **kwargs: attention_pytorch_causal(
         q, k, v, **kwargs
     ),
-    "flex_full_with_causal": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=q.size(0), H=q.size(1), M=q.size(2), N=k.size(2)), **kwargs),
+    "flex_full_with_causal": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(causal_mask, B=1, H=1, M=q.size(2), N=k.size(2)), **kwargs),
 
     "full_with_sliding_window": lambda q, k, v, **kwargs: attention_pytorch_sliding_window(
         q, k, v, window_size=256, **kwargs
     ),
-    "flex_full_with_sliding_window": lambda q, k, v, **kwargs: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2)), **kwargs),
+    "flex_full_with_sliding_window": lambda q, k, v, **kwargs: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=1, H=1, M=q.size(2), N=k.size(2)), **kwargs),
     
     "full_with_prefix_lm": lambda q, k, v, **kwargs: attention_pytorch_prefix_lm(
         q, k, v, prefix_lengths=256 , **kwargs
     ),
-    "flex_full_with_prefix_lm": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256),B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2)), **kwargs),
+    "flex_full_with_prefix_lm": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256), B=1, H=1, M=q.size(2), N=k.size(2)), **kwargs),
     
     "full_with_document_mask": lambda q, k, v, **kwargs: attention_pytorch_document_mask(
         q, k, v, document_id=create_document_id(q.size(0), q.size(2), num_docs=12), **kwargs
     ),
-    "flex_full_with_document_mask": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_doc_mask_mod(max_seq_len=q.size(2), num_docs=12), B=q.size(0), H=q.size(1), M=q.size(2), N=k.size(2)), **kwargs),
+    "flex_full_with_document_mask": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_doc_mask_mod(max_seq_len=q.size(2), num_docs=12), B=1, H=1, M=q.size(2), N=k.size(2)), **kwargs),
 }
 
 from _utils import Config, run_benchmark, run_test, attention_nflop
