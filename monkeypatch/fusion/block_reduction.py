@@ -737,8 +737,10 @@ def iteration_ranges_ranges_code(self: TritonKernel, entry, block_size=''):
 
 
 @monkey.patch(ir.View)
-def make_loader(self):
-    """ranges now don't have size/shape; maintain shape in View (resulted from e.g. unsqueeze)"""
+def make_loader(self: ir.View):
+    """patched ranges don't have size/shape; maintain shape in View (resulted from e.g. unsqueeze)
+    This case when not is_contiguous_storage_and_layout(x)
+    """
     inner = self.data.make_loader()
     reindex = self.make_reindexer()
 
@@ -753,6 +755,26 @@ def make_loader(self):
             if None in axis[-2:]:  # TODO @bozhiyou ad hoc for 2D mm
                 return ops.unsqueeze(loaded, axis[-2:])
         return loaded
+
+    return loader
+
+@monkey.patch(ir.ReinterpretView)
+def make_loader(self: ir.ReinterpretView):
+    """patched ranges don't have size/shape; maintain shape in View (resulted from e.g. unsqueeze)
+    This case when is_contiguous_storage_and_layout(x)
+    """
+    def loader(index):
+        indexer = self.layout.make_indexer()
+        tmp_loader = ops.load(self.get_name(), indexer(index))
+        if self.layout.dtype != self.data.dtype:
+            ret = ops.to_dtype_bitcast(tmp_loader, self.dtype, self.data.dtype)
+        else:
+            ret = tmp_loader
+        if len(self.layout.size) > len(self.data.layout.size):
+            axis = [':' if s != 0 else None for s in self.layout.stride]
+            if None in axis[-2:]:  # TODO @bozhiyou ad hoc for 2D mm
+                return ops.unsqueeze(ret, axis[-2:])
+        return ret
 
     return loader
 

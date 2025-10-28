@@ -3,9 +3,8 @@ import math
 
 def get_sliding_mask(query, window_size):
     # Create (L, L) mask: True where j ∉ [i - window_size, i]
-    N, H, L, D = query.shape
-    q_idx = torch.arange(L, device=query.device).view(L, 1)
-    k_idx = torch.arange(L, device=query.device).view(1, L)
+    q_idx = torch.arange(query.size(-2), device=query.device).view(query.size(-2), 1)
+    k_idx = torch.arange(query.size(-2), device=query.device).view(1, query.size(-2))
     causal_sliding_mask = (q_idx < k_idx) | ((q_idx - k_idx) > window_size)  # shape (L, L)
 
     # Expand to (1, 1, L, L)
@@ -17,8 +16,7 @@ def attention_pytorch_sliding_window(
     key: torch.Tensor,
     value: torch.Tensor,
     window_size: int = 1024,
-    dropout_p: float = 0.0,
-    scale: float = None,
+    scale = None,
     enable_gqa: bool = False
 ) -> torch.Tensor:
     """
@@ -26,10 +24,9 @@ def attention_pytorch_sliding_window(
     - Left-only attention (causal)
     - Sliding window of size `window_size` behind each token
     """
-    N, H, L, D = query.shape
-    assert L == key.size(-2) == value.size(-2)
+    assert query.size(-2) == key.size(-2) == value.size(-2)
 
-    scale_factor = 1.0 / math.sqrt(D) if scale is None else scale
+    scale_factor = 1.0 / math.sqrt(query.size(-1)) if scale is None else scale
 
     if enable_gqa:
         # Reshape query to align with groups

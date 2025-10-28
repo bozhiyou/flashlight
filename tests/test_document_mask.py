@@ -94,10 +94,10 @@ if __name__ == '__main__':
 
     from torch.testing import assert_close, make_tensor
     DEVICE = torch.device("cuda:0")
-    BATCH = 4
+    BATCH = 1
     HEAD = 16
     GROUP_SIZE = 8
-    N_CTX = 1024
+    N_CTX = 16384
     HEAD_DIM = 64
     DTYPE = torch.bfloat16
     # torch.set_float32_matmul_precision('high')

@@ -6,18 +6,26 @@ def attention_pytorch_prefix_lm(
     query: torch.Tensor,  # [B, H, S, D]
     key: torch.Tensor,
     value: torch.Tensor,
-    attn_mask: torch.Tensor,
+    prefix_lengths: int = 256,
     scale: Optional[float] = None,
     enable_gqa = False
 ) -> torch.Tensor:
-    B, H, S, D = query.shape
 
     # if isinstance(prefix_lengths, int):
     #     prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
     # assert prefix_lengths.shape == (B,), f"Expected prefix_lengths shape [B], got {prefix_lengths.shape}"
 
     # Scale factor
-    scale = scale or (1.0 / math.sqrt(D))
+    scale = 1.0 / math.sqrt(query.size(-1)) if scale is None else scale
+
+    # # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
+    # q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
+    # k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
+    # prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+
+    # max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
+    # causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
+    attn_mask = get_prefix_lm_mask(query, prefix_lengths)
 
     if enable_gqa:
         # Reshape query to align with groups
@@ -32,14 +40,6 @@ def attention_pytorch_prefix_lm(
     # Compute attention scores: [B, H, S, S]
     attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
 
-    # # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
-    # q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
-    # k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
-    # prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
-
-    # max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
-    # causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
-
     attn_scores = attn_scores.masked_fill(attn_mask, -1e10)
 
     # Compute softmax over attention scores
@@ -49,12 +49,11 @@ def attention_pytorch_prefix_lm(
 
 
 def get_prefix_lm_mask(query, prefix_lengths):
-    B, H, S, D = query.shape
-    prefix_lengths = torch.full((B,), prefix_lengths, dtype=torch.long, device=query.device)
+    prefix_lengths = torch.full((query.size(0),), prefix_lengths, dtype=torch.long, device=query.device)
      # Build combined prefix-lm-causal mask: allow k <= max(prefix_len[b]-1, q)
-    q_idx = torch.arange(S, device=query.device).view(1, 1, S, 1)  # [1, 1, S, 1]
-    k_idx = torch.arange(S, device=query.device).view(1, 1, 1, S)  # [1, 1, 1, S]
-    prefix_idx = prefix_lengths.view(B, 1, 1, 1) - 1  # [B, 1, 1, 1]
+    q_idx = torch.arange(query.size(-2), device=query.device).view(1, 1, query.size(-2), 1)  # [1, 1, S, 1]
+    k_idx = torch.arange(query.size(-2), device=query.device).view(1, 1, 1, query.size(-2))  # [1, 1, 1, S]
+    prefix_idx = prefix_lengths.view(query.size(0), 1, 1, 1) - 1  # [B, 1, 1, 1]
 
     max_idx = torch.maximum(prefix_idx, q_idx)  # [B, 1, S, 1]
     causal_prefix_mask = k_idx > max_idx  # [B, 1, S, S]
@@ -83,10 +82,10 @@ if __name__ == '__main__':
     v = make_tensor((BATCH, HEAD // GROUP_SIZE, N_CTX, HEAD_DIM), dtype=DTYPE, device=DEVICE, requires_grad=False)
 
     o0 = attention_pytorch_prefix_lm(
-        q.to(torch.float32), k.to(torch.float32), v.to(torch.float32), attn_mask=get_prefix_lm_mask(q, 256), enable_gqa=(q.size(1) != k.size(1))
+        q.to(torch.float32), k.to(torch.float32), v.to(torch.float32), prefix_lengths=256, enable_gqa=(q.size(1) != k.size(1))
     )
     o1 = torch.compile(dynamic=False)(attention_pytorch_prefix_lm)(
-        q, k, v, attn_mask=get_prefix_lm_mask(q, 256), enable_gqa=(q.size(1) != k.size(1))
+        q, k, v, prefix_lengths=256, enable_gqa=(q.size(1) != k.size(1))
     )
     assert_close(o0, o1.to(torch.float32), atol=1e-2, rtol=1e-2)
 

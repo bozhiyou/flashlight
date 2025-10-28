@@ -145,7 +145,7 @@ ATTENTION_REGISTRY = {
     "flex_full_with_sliding_window": lambda q, k, v, **kwargs: flex_attention(q, k, v,block_mask=create_block_mask_cached(generate_sliding_window(window_size=256), B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2)), **kwargs),
     
     "full_with_prefix_lm": lambda q, k, v, **kwargs: attention_pytorch_prefix_lm(
-        q, k, v, attn_mask=get_prefix_lm_mask(q, 256) , **kwargs
+        q, k, v, prefix_lengths=256 , **kwargs
     ),
     "flex_full_with_prefix_lm": lambda q, k, v, **kwargs: flex_attention(q, k, v, block_mask=create_block_mask_cached(generate_prefix_lm_mask(prefix_length=256),B=q.size(0),H=q.size(1),   M=q.size(2),  N=k.size(2)), **kwargs),
     
@@ -242,9 +242,8 @@ if __name__ == "__main__":
     }
     # https://arxiv.org/pdf/2412.05496
     FLEX_CONFIGS = {
-        "batch_sizes": [64, 16, 4, 1],
-        # "batch_sizes": [32] * 4,
-        "seq_lengths": [1024, 4096, 16384, 65536],
+        "batch_sizes": [32, 16, 8, 4, 2, 1],
+        "seq_lengths": [512, 1024, 2048, 4096, 8192, 16384],
         "head_dims": [64],
         "group_size": [8, 1],
         "model_dim": 1024,  # 16 heads
