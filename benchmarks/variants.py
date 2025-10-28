@@ -202,12 +202,13 @@ def main(args, benchmark_registry):
                     # return  # run only one config
                     # continue
 
-                    try:
-                        res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd)
-                    except:
-                        res = (float('nan'), float('nan'))
-                    result = Result(attention_name, *res)
-                    results.append([*result, *config])
+                    # try:
+                    time_ms, tflops = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, return_mode=None)
+                    # except:
+                    #     time_ms, tflops = float('nan'), float('nan')
+                    for t in time_ms if isinstance(time_ms, list) else [time_ms]:
+                        result = Result(attention_name, t, tflops)
+                        results.append([*result, *config])
                 # Print results for this config
                 print(
                     tabulate(

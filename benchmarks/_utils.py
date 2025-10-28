@@ -61,7 +61,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
     Adapted from triton.testing.do_bench which defines warmup and repeatition time in ms.
     Here we define number of times.
     """
-    assert return_mode in ["min", "max", "mean", "median"]
+    assert return_mode is None or return_mode in ["min", "max", "mean", "median"]
 
     di = torch._dynamo.device_interface.get_interface_for_device(device_type)
 
@@ -112,7 +112,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
             ret = ret[0]
         return ret
     if return_mode is None:
-        return [times.item()] if len(ret) == 1 else times.tolist()
+        return [times.item()] if len(times) == 1 else times.tolist()
     return getattr(torch, return_mode)(times).item()
 
 
@@ -190,7 +190,10 @@ def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0
 
     time_f = benchmark_forward(attention_func, *args, return_mode=return_mode, enable_gqa=config.group_size != 1) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
     # Calculate TFLOPS
-    tflops_fwd = efficiency(flops, time_f, time_unit='ms')
+    tflops_fwd = -1
+    if flops > 0:
+        t = torch.mean(torch.tensor(time_f)).item() if isinstance(time_f, list) else time_f
+        tflops_fwd = efficiency(flops, t, time_unit='ms')
     # tfps_bwd = efficiency(flop_bwd, time_b)
 
     return time_f, tflops_fwd
