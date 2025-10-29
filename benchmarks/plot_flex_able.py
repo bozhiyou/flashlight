@@ -210,14 +210,14 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             hkv = benchmark_data['nheads_kv'].unique()[0]
 
             assert not benchmark_data.empty
-
+            
             # Plot FW_Time_ms bars
             sns.lineplot(
                 data=benchmark_data,
                 x="batch_seqlen",
                 y="FW_Time_ms",
                 hue="impl_config", # Use combined hue
-                ax=ax1,
+                ax=ax1,style='impl_config',markers=True
             )
             ax1.set_xlabel("(Batch Size, Sequence Length)")
             
@@ -289,6 +289,10 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
 
     # Create a single legend
     if handles1:
+         for x,l in enumerate(labels1):
+             labels1[x] = l.replace("\n(16, 64)", "").strip()
+             if "Flex" in labels1[x] and "FlexAttention" not in labels1[x]:
+                 labels1[x] = labels1[x].replace("Flex", "FlexAttention")
          fig.legend(handles1, labels1, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=5)
 
 
