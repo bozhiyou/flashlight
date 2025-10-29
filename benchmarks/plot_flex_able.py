@@ -11,13 +11,13 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
     Loads and preprocesses the benchmark data from CSV files.
     """
     benchmark_names = {
-        "full": "vanilla (Vaswani et al 2017)",
+        "full": "vanilla",
         "full_with_alibi": "ALiBi",
         "full_with_softcap": "softcap",
         "full_with_causal": "causal",
-        "full_with_sliding_window": "sliding window (wsz=256)",
-        "full_with_prefix_lm": "prefix LM (causal prefix sz=256)",
-        "full_with_document_mask": "document mask (#docs=12)",
+        "full_with_sliding_window": "sliding window",
+        "full_with_prefix_lm": "prefix LM",
+        "full_with_document_mask": "document mask",
     }
 
     try:
