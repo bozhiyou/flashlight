@@ -190,7 +190,9 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
         figsize=(5 * n_cols, 6 * n_rows), 
         squeeze=False # Ensure axes is always 2D
     )
-    
+    fig.set_size_inches(17, 7)
+    plt.tight_layout()
+
     handles1, labels1 = [], [] # Initialize for legend
 
     for row_idx, group_size in enumerate(group_sizes):
@@ -210,7 +212,7 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             assert not benchmark_data.empty
 
             # Plot FW_Time_ms bars
-            sns.barplot(
+            sns.lineplot(
                 data=benchmark_data,
                 x="batch_seqlen",
                 y="FW_Time_ms",
@@ -221,15 +223,15 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             
             # Add row label
             if col_idx == 0:
-                ax1.set_ylabel(f"Hq = {hq}, Hkv = {hkv}\n\nTime (ms)")
+                ax1.set_ylabel(f"Hq = {hq}, Hkv = {hkv}\n\nTime (ms)", fontsize=12)
             else:
-                ax1.set_ylabel("Time (ms)")
+                ax1.yaxis.get_label().set_visible(False)
                 
-            ax1.set_title(f"{benchmark}", fontsize=10)
+            ax1.set_title(f"{benchmark}", fontsize=12)
             ax1.tick_params(
                 axis='x',
-                # rotation=45,
-                labelsize=8)
+                rotation=90,
+                labelsize=12)
             
             # Get legend from first plot
             if row_idx == 0 and col_idx == 0:
@@ -277,16 +279,16 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
                                      f'{speedup_val:.2f}x', 
                                      ha='center', 
                                      va='bottom', 
-                                     fontsize=7, 
+                                     fontsize=12, 
                                     #  rotation=90,
                                      color='black')
 
     # Create a single legend
     if handles1:
-         fig.legend(handles1, labels1, loc='upper center', bbox_to_anchor=(0.5, .05), ncol=3)
+         fig.legend(handles1, labels1, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=5)
 
 
-    plt.suptitle("Flex-able Benchmarks (Bar Plot with Speedup)", y=1.02)
+    #plt.suptitle("Flex-able Benchmarks (Bar Plot with Speedup)", y=1.02)
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.15 if handles1 else 0.1) # Adjust bottom for legend
 
