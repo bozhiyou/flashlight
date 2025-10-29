@@ -6,7 +6,7 @@ from matplotlib.ticker import ScalarFormatter
 import sys
 
 
-def load_and_prepare_data(ours_csv, flex_csv):
+def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv):
     """
     Loads and preprocesses the benchmark data from CSV files.
     """
@@ -23,22 +23,30 @@ def load_and_prepare_data(ours_csv, flex_csv):
     try:
         ours_df = pd.read_csv(ours_csv)
         flex_df = pd.read_csv(flex_csv)
+        flexnocache_df = pd.read_csv(flexnocache_csv)
+        torchcompile_df = pd.read_csv(torchcompile_csv)
     except FileNotFoundError as e:
-        print(f"Error: {e}. Make sure '{ours_csv}' and '{flex_csv}' are in the same directory.")
+        print(f"Error: {e}. Make sure '{ours_csv}', '{flex_csv}', '{flexnocache_csv}', and '{torchcompile_csv}' are in the same directory.")
         sys.exit(1)
 
-
     ours_df = ours_df.rename(columns={"Implementation": "Benchmark"})
-    ours_df["Implementation"] = "Ours"
-    ours_df['Benchmark'] = ours_df['Benchmark'].replace(benchmark_names)
+    ours_df["Implementation"] = "Flashlight"
 
     flex_df = flex_df.rename(columns={"Implementation": "Benchmark"})
     flex_df["Benchmark"] = flex_df["Benchmark"].str.replace("flex_", "")
-    flex_df["Implementation"] = "Flex"
+    flex_df["Implementation"] = "Flex (Cache Hit)"
     # flex_df["FW_Time_ms"] = flex_df["FW_Time_ms"].replace(-1, float('nan'))
-    flex_df['Benchmark'] = flex_df['Benchmark'].replace(benchmark_names)
 
-    combined_df = pd.concat([ours_df, flex_df], ignore_index=True)
+    flexnocache_df = flexnocache_df.rename(columns={"Implementation": "Benchmark"})
+    flexnocache_df["Benchmark"] = flexnocache_df["Benchmark"].str.replace("flex_", "")
+    flexnocache_df["Implementation"] = "Flex (Cache Miss)"
+    # flexnocache_df["FW_Time_ms"] = flexnocache_df["FW_Time_ms"].replace(-1, float('nan'))
+
+    torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
+    torchcompile_df["Implementation"] = "torch.compile"
+
+    combined_df = pd.concat([ours_df, flex_df, flexnocache_df, torchcompile_df], ignore_index=True)
+    combined_df['Benchmark'] = combined_df['Benchmark'].replace(benchmark_names)
     combined_df["nheads_kv"] = combined_df["nheads"] // combined_df["group_size"]
 
     # Calculate speedup
@@ -46,7 +54,7 @@ def load_and_prepare_data(ours_csv, flex_csv):
                                          columns="Implementation",
                                          values="FW_Time_ms").reset_index()
     # result NaN if "Flex" is NaN
-    speedup_df["Speedup"] = speedup_df["Flex"] / speedup_df["Ours"]
+    speedup_df["Speedup"] = speedup_df["Flex (Cache Hit)"] / speedup_df["Flashlight"]
 
     # Prepare data for plotting
     combined_df["nheads_headdim"] = combined_df.apply(lambda row: f"({row['nheads']}, {row['headdim']})", axis=1)
@@ -94,7 +102,7 @@ def plot_line_charts(combined_df, speedup_df, benchmarks):
             style="nheads_headdim",
             markers=True,
             ax=ax1,
-            palette={"Ours": "blue", "Flex": "green"},
+            palette={"Flashlight": "blue", "Flex (Cache Hit)": "green", "Flex (Cache Miss)": "orange", "torch.compile": "red"},
             dashes=dashes_nhead_headdim,
         )
         ax1.set_xlabel("(Batch Size, Sequence Length)")
@@ -157,7 +165,7 @@ def plot_line_charts(combined_df, speedup_df, benchmarks):
 def plot_bar_charts(combined_df, speedup_df, benchmarks):
     """
     Generates and saves bar charts comparing implementations and showing speedup
-    as text labels on the "Ours" bars.
+    as text labels on the "Flashlight" bars.
     Rows are determined by 'group_size'.
     """
     print("Generating bar charts...")
@@ -165,7 +173,7 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
     # Create a combined column for hue to separate (impl, nheads_headdim)
     combined_df["impl_config"] = combined_df["Implementation"] + "\n" + combined_df["nheads_headdim"]
     # Create a matching column in speedup_df to look up values
-    speedup_df["impl_config"] = "Ours\n" + speedup_df["nheads_headdim"]
+    speedup_df["impl_config"] = "Flashlight\n" + speedup_df["nheads_headdim"]
 
     # Sort for consistent plotting
     combined_df = combined_df.sort_values(by=["Benchmark", "batch_size", "seqlen", "nheads", "headdim"])
@@ -250,8 +258,8 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
 
             # Iterate over bar containers
             for container, label in zip(ax1.containers, l):
-                # Only add labels to "Ours" bars
-                if "Ours" in label:
+                # Only add labels to "Flashlight" bars
+                if "Flashlight" in label:
                     # Iterate over bars in this container
                     for bar_index, bar in enumerate(container):
                         # Find the corresponding x-label
@@ -297,21 +305,33 @@ def main():
         help="Type of plot to generate ('line' or 'bar'). Default is 'bar'."
     )
     parser.add_argument(
-        '--flex',
-        type=str,
-        default='all_flex.csv',
-        help="CSV file containing all FlexAttention results. Default is 'all_flex.csv'."
-    )
-    parser.add_argument(
         '--flashlight',
         type=str,
         default='all.csv',
         help="CSV file containing all Flashlight results. Default is 'all.csv'."
     )
+    parser.add_argument(
+        '--flex',
+        type=str,
+        default='all_flex.csv',
+        help="CSV file containing all FlexAttention with a mask cache results. Default is 'all_flex.csv'."
+    )
+    parser.add_argument(
+        '--flex-no-cache',
+        type=str,
+        default='all_flexnocache.csv',
+        help="CSV file containing all FlexAttention without a mask cache results. Default is 'all_flexnocache.csv'."
+    )
+    parser.add_argument(
+        '--torch-compile',
+        type=str,
+        default='all_torchcompile.csv',
+        help="CSV file containing all torch.comnpile results. Default is 'all_torchcompile.csv'."
+    )
     args = parser.parse_args()
 
     # Load and process data
-    combined_df, speedup_df, benchmarks = load_and_prepare_data(args.flashlight, args.flex)
+    combined_df, speedup_df, benchmarks = load_and_prepare_data(args.flashlight, args.flex, args.flex_no_cache, args.torch_compile)
 
     # Generate the chosen plot
     if args.plot == 'line':
