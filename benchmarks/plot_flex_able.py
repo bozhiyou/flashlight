@@ -223,7 +223,11 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             
             # Add row label
             if col_idx == 0:
-                ax1.set_ylabel(f"Hq = {hq}, Hkv = {hkv}\n\nTime (ms)", fontsize=12)
+                if hq == 16 and hkv == 16:
+                    label = "MHA"
+                else:
+                    label = "GQA"
+                ax1.set_ylabel(f"Time (ms) for {label}", fontsize=12)
             else:
                 ax1.yaxis.get_label().set_visible(False)
                 
