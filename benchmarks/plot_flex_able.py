@@ -45,7 +45,7 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
     torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
     torchcompile_df["Implementation"] = "torch.compile"
 
-    combined_df = pd.concat([ours_df, flex_df, flexnocache_df, torchcompile_df], ignore_index=True)
+    combined_df = pd.concat([ours_df, flex_df, flexnocache_df], ignore_index=True)
     combined_df['Benchmark'] = combined_df['Benchmark'].replace(benchmark_names)
     combined_df["nheads_kv"] = combined_df["nheads"] // combined_df["group_size"]
 
