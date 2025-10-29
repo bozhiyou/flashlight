@@ -71,7 +71,7 @@ def main(args, benchmark_registry):
                 # config = Config(4, 4096, 32, 64, False, 0.0)
                 print(f"### Config: {config} ###")
                 # Calculate FLOPS
-                # flop_fwd = TODO
+                flop_fwd = 4 * batch_size * 256 * seqlen**2 * nheads * headdim  # estimate as vanilla
                 # flop_bwd = flops(batch_size, seqlen, headdim, nheads, causal, mode="bwd")
 
                 # run_test(config, 'ipa', evoformer_attention.attention_reference, flops=flop_fwd, make_qkv=evoformer_attention.make_input)
@@ -94,10 +94,10 @@ def main(args, benchmark_registry):
                     # return  # run only one config
                     # continue
 
-                    try:
-                        res = run_benchmark(config, attention_name, attention_func, flops=-1, make_qkv=test_evoattn.make_input)
-                    except:
-                        res = (float('nan'), float('nan'))
+                    # try:
+                    res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, make_qkv=test_evoattn.make_input)
+                    # except:
+                    #     res = (float('nan'), float('nan'))
                     result = Result(attention_name, *res)
                     results.append([*result, *config])
                 # Print results for this config
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument("--seqlen", type=int, nargs="+", default=DEFAULT["seq_lengths"], help="Sequence length")
     parser.add_argument("--dim", type=int, default=DEFAULT_MODEL_DIM, help="Input dimension")
     parser.add_argument("--headdim", type=int, nargs="+", default=DEFAULT["head_dims"], help="Head dimension")
-    parser.add_argument("--dropout_p", type=float, default=DEFAULT["dropout_p"], help="Dropout probability")
+    parser.add_argument("--dropout_p", type=float, default=0.0, help="Dropout probability")
     parser.add_argument("--skip_correctness", action="store_true", help="Skip correctness checks")
     args = parser.parse_args()
 

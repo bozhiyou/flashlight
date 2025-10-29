@@ -70,7 +70,7 @@ def main(args, benchmark_registry):
                 # config = Config(4, 4096, 32, 64, False, 0.0)
                 print(f"### Config: {config} ###")
                 # Calculate FLOPS
-                # flop_fwd = TODO
+                flop_fwd = 8 * batch_size * seqlen**2 * nheads * headdim  # estimate as double vanilla
                 # flop_bwd = flops(batch_size, seqlen, headdim, nheads, causal, mode="bwd")
 
                 # run_test(config, 'diffattn', multihead_diffattn.diffattn, flops=flop_fwd, make_qkv=multihead_diffattn.make_input)
@@ -93,10 +93,10 @@ def main(args, benchmark_registry):
                     # return  # run only one config
                     # continue
 
-                    try:
-                        res = run_benchmark(config, attention_name, attention_func, flops=-1, make_qkv=test_diffattn.make_input)
-                    except:
-                        res = (float('nan'), float('nan'))
+                    # try:
+                    res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, make_qkv=test_diffattn.make_input)
+                    # except:
+                    #     res = (float('nan'), float('nan'))
                     result = Result(attention_name, *res)
                     results.append([*result, *config])
                 # Print results for this config

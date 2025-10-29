@@ -31,7 +31,7 @@ import time
 
 from torch._inductor.runtime.benchmarking import benchmarker
 
-def warmup_max(fn, n=3):
+def warmup_max(fn, n=10):
     """Heat the GPU until max frequency."""
     assert callable(fn)
     import pynvml
@@ -58,8 +58,10 @@ def warmup_max(fn, n=3):
 def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flush=True, return_mode="mean",
              device_type="cuda"):
     f"""
-    Adapted from triton.testing.do_bench which defines warmup and repeatition time in ms.
-    Here we define number of times.
+    Adapted from `triton.testing.do_bench`. Changes:
+    - try to warm up GPU to its max frequency.
+    - return the list of timing when `return_mode` is None.
+    - `warmup` and `rep` was defined as time in ms; here we use number of times.
     """
     assert return_mode is None or return_mode in ["min", "max", "mean", "median"]
 
@@ -76,10 +78,8 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flu
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device=device_type)
 
-
-
     # compute number of warmup and repeat
-    n_warmup = max(3, int(warmup // 100))  # max(1, int(warmup / estimate_ms))
+    n_warmup = max(10, int(warmup // 100))  # max(1, int(warmup / estimate_ms))
     n_repeat = max(20, int(rep // 100))  # max(1, int(rep / estimate_ms))
     start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
@@ -185,10 +185,10 @@ def efficiency(flop: int, time: float, time_unit: Literal['s', 'ms'] = 'ms') -> 
 # Interface
 ###########
 
-def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv, return_mode='mean'):
+def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv, return_mode='mean', **kwargs):
     args = make_qkv(config, attention_name)
 
-    time_f = benchmark_forward(attention_func, *args, return_mode=return_mode, enable_gqa=config.group_size != 1) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
+    time_f = benchmark_forward(attention_func, *args, return_mode=return_mode, enable_gqa=config.group_size != 1, **kwargs) # if mode == 'fwd' else do_bench(lambda: out.backward(torch.randn_like(out)))
     # Calculate TFLOPS
     tflops_fwd = -1
     if flops > 0:
@@ -199,16 +199,16 @@ def run_benchmark(config, attention_name: str, attention_func, *, flops: int = 0
     return time_f, tflops_fwd
 
 
-def run_test(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv):
+def run_test(config, attention_name: str, attention_func, *, flops: int = 0, make_qkv=_make_qkv, **kwargs):
     args = make_qkv(config, attention_name)
-    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1)
+    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1, **kwargs)
 
     target()
 
 
-def run_torch_profiler(config, attention_name: str, attention_func,  *, flops: int = 0, make_qkv=_make_qkv):
+def run_torch_profiler(config, attention_name: str, attention_func,  *, flops: int = 0, make_qkv=_make_qkv, **kwargs):
     args = make_qkv(config, attention_name)
-    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1)
+    target = lambda: attention_func(*args, enable_gqa = config.group_size != 1, **kwargs)
 
     from torch.profiler import profile, ProfilerActivity
     import json
