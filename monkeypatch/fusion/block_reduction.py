@@ -43,6 +43,39 @@ fusion_log = torch._logging.getArtifactLogger('torch._inductor', "fusion")  # fu
 # do not merge loops before fusion
 torch._inductor.config.loop_ordering_after_fusion = True
 
+@monkey.patch(TritonKernel) #IRENE
+def reduction_resize(self: TritonKernel, value: str) -> str:
+    """
+    Patched version that handles edge cases in reduction operations.
+    Specifically handles cases where:
+    1. _load_mask is None
+    2. The sizes list would be empty after processing
+    3. Falls back gracefully without breaking PyTorch's reduction_resize
+    """
+    # Check if _load_mask is None - this means Flashlight couldn't set up
+    # the proper masking for this reduction pattern
+    if self._load_mask is None:
+        # Instead of falling back to PyTorch's method which also has issues,
+        # return the value as-is without reshape
+        # PyTorch's triton codegen will handle this in a different way
+        return value
+    
+    # Original Flashlight logic - extract sizes from _load_mask
+    sizes = [f"tl.{val}" for val in self._load_mask[1:]]
+    
+    # Additional safety check: if sizes is empty, we can't do the reshape
+    # This happens with certain tensor layouts like [256, 1, 1, 3, 3] with
+    # reduction_ranges=[4, 4] where after removing dimensions, nothing is left
+    if not sizes:
+        # Return value without reshape - let Triton handle it naturally
+        return value
+    
+    # Normal Flashlight path - apply reshape
+    sizes[-1] = "None"
+    code = f"tl.reshape({value}, [{', '.join(sizes)}])"
+    return code
+    
+
 # TODO @bozhiyou debug persistent reduction
 @monkey.patch(TritonKernel)
 def should_use_persistent_reduction(self):
@@ -50,6 +83,10 @@ def should_use_persistent_reduction(self):
     return False
 
 from ._reduction import ReductionExt
+
+# Patch PyTorch's reduction_resize to handle empty sizes list
+original_reduction_resize = TritonKernel.reduction_resize
+
 
 @monkey.patch(TritonKernelOverrides)
 @staticmethod
@@ -915,7 +952,7 @@ class IndexingVarOrder:
     def add(cls, expr: sympy.Expr, ordered_vars: Sequence):
         vars = OrderedSet()
         for v in ordered_vars:
-            if v.is_Integer:
+            if v.is_integer: ## Openfold
                 continue
             if not expr.has(v):
                 continue

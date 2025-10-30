@@ -908,7 +908,7 @@ def codegen_range_tree(self: TritonKernel) -> None:
 
 
 @monkey.patch(TritonKernel)
-def filter_masks(self: TritonKernel, mask_vars) -> None:
+def filter_masks(self: TritonKernel, mask_vars) -> None: ## Openfold
     """
     + add mask suffix
     """
@@ -922,8 +922,14 @@ def filter_masks(self: TritonKernel, mask_vars) -> None:
             continue
         if tree.tensor_dim is not None:
             sizes = ["None"] * ndims
-            sizes[tree.tensor_dim] = ":"
-            size_suffix = f"[{', '.join(sizes)}]"
+            # ADD BOUNDS CHECKING HERE  - Openfold
+            if tree.tensor_dim < len(sizes):
+                sizes[tree.tensor_dim] = ":"
+                size_suffix = f"[{', '.join(sizes)}]"
+            else:
+                # Log warning and skip size suffix if tensor_dim is out of bounds
+                fusion_log.debug(f"Warning: tensor_dim {tree.tensor_dim} out of range for ndims {ndims}")
+                size_suffix = ''
         else:
             size_suffix = ''
         if len(tree.var_list) > 1:

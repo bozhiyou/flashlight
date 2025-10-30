@@ -1241,10 +1241,15 @@ class _RangeMethods:
 
 
 @functools.lru_cache()
-def _have_compatible_ranges(node1: BaseSchedulerNode, node2: BaseSchedulerNode):
+def _have_compatible_ranges(node1: BaseSchedulerNode, node2: BaseSchedulerNode): ## Openfold
     assert node1.get_operation_names() & node2.ancestors, "this is the outer condition to fuse vertically"
-    if not _RangeMethods.ranges_fit(node1, node2):
+    try:
+        if not _RangeMethods.ranges_fit(node1, node2):
+            return False
+    except (AssertionError, Exception) as e:
+        fusion_log.debug(f"Range compatibility check failed for {node1.get_name()} + {node2.get_name()}: {e}")
         return False
+    
     fusion_log.debug(f"\033[33mfuse\033[0m {node1.get_name()} {node1.group[1]} with {node2.get_name()} {node2.group[1]}: {node1.group[1]}, {node2.group[1]}")
     return True
 
@@ -1317,8 +1322,14 @@ def can_fuse_vertical(self: scheduler.Scheduler,
 def can_fuse_vertical(self: TritonScheduling,
     node1: BaseSchedulerNode, node2: BaseSchedulerNode
 ) -> bool:
-    """Identifying and enabling our new fusion for dependent reductions."""
-    can = monkey.fallback(self, node1, node2) or _have_compatible_ranges(node1, node2)
+    """Identifying and enabling our new fusion for dependent reductions.""" ## Openfold
+    try:
+        can = monkey.fallback(self, node1, node2) or _have_compatible_ranges(node1, node2)
+    except (AssertionError, Exception) as e:
+        # If tiling selection fails, skip this fusion
+        fusion_log.debug(f"Skipping fusion {node1.get_name()} + {node2.get_name()}: {e}")
+        return False
+    
     if can and node1.is_reduction() and node2.is_reduction():
         for n2 in node2.get_nodes():
             assert isinstance(n2, SchedulerNode), n2

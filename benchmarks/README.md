@@ -1,3 +1,38 @@
+
+## OpenFold Installation
+
+Clone the repository and install dependencies:
+
+```bash
+git clone https://github.com/aqlaboratory/openfold.git
+cd openfold
+mamba env update -f environment.yml
+scripts/install_third_party_dependencies.sh 
+```
+
+
+## Running benchmarks
+```
+# Baseline
+
+python benchmark_openfold.py \
+    --n_blocks 4 \
+    --n_iterations 10 \
+    --compile \
+    --compile_selective
+
+# Flashlight 
+
+python benchmark_openfold_fl.py \
+    --n_blocks 4 \
+    --n_iterations 10 \
+    --compile \
+    --compile_selective
+
+```
+Note `--compile_selective` flag uses torch.compile on the ipa structure only
+
+-------------------------------
 - FlexAttention examples benchmark: `variants.py`
 
 NOTE: comment `apply_patch()` for FlexAttention benchmark
