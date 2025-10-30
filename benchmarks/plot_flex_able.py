@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
 import sys
-
+import numpy as np
 
 def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv):
     """
@@ -211,14 +211,63 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
 
             assert not benchmark_data.empty
             
+            flashlight_data = benchmark_data[benchmark_data["Implementation"] == "Flashlight"]
+            avg_times = []
+            runs = 20
+            categories = benchmark_data['batch_seqlen'].unique()
+            ind = np.array(list(range(len(categories))))
+            width = 0.3
+            std = []
+            for i in range(0, len(flashlight_data.FW_Time_ms), runs):
+                avg_times += [sum(list(flashlight_data.FW_Time_ms)[i:i+runs])/runs]
+                std += [float(np.std(list(flashlight_data.FW_Time_ms)[i:i+runs]))]
+            flash_bar = ax1.bar(ind, avg_times, width, label="Flashlight")
+            ax1.errorbar(ind, avg_times, yerr=std, fmt='none', ecolor='black',capsize=2)
+            
+            flex_cache_hit = benchmark_data[benchmark_data["Implementation"] == "Flex (Cache Hit)"]
+            flex_cache_miss = benchmark_data[benchmark_data["Implementation"] == "Flex (Cache Miss)"]
+            hit_avg_times = []
+            mask_avg_times = []
+            miss_times = []
+            std = []
+            speedup = []
+            runs = 20
+            categories = benchmark_data['batch_seqlen'].unique()
+            for i in range(0, len(flex_cache_hit.FW_Time_ms), runs):
+                hit_avg_times += [sum(list(flex_cache_hit.FW_Time_ms)[i:i+runs])/runs]
+                miss_times += [sum(list(flex_cache_miss.FW_Time_ms)[i:i+runs])/runs]
+                mask_avg_times += [miss_times[-1] - hit_avg_times[-1]]
+                std += [float(np.std(list(flex_cache_miss.FW_Time_ms)[i:i+runs]))]
+            
+            flex_kernel_bars = ax1.bar(ind+width, hit_avg_times, width, label="FlexAttention (Kernel)")
+            flex_mask_bars = ax1.bar(ind+width, mask_avg_times, width, bottom=hit_avg_times, yerr=std, ecolor='black',capsize=2, label="FlexAttention (Block Mask)")
+            # ax1.errorbar(ind+width, mask_avg_times, bottom=hit_avg_times, yerr=std, fmt='none', ecolor='black',capsize=2)
+
+            speedups = []
+            for flash,flex in zip(avg_times, miss_times):
+                speedups += [flex/flash]
+            
+            for speedup, kernel_bar, mask_bar in zip(speedups, flex_kernel_bars, flex_mask_bars):
+                ax1.text(kernel_bar.get_x() + kernel_bar.get_width() / 2.0, 
+                         kernel_bar.get_height() + mask_bar.get_height()+0.2, f'{speedup:.2f}x',
+                         ha='center', 
+                         va='bottom', 
+                         fontsize=12, 
+                         rotation=90,
+                         color='black')
+                                 
+            ax1.set_xticks(ind)
+            ax1.set_xticklabels(categories)
+            
+            # ax1.bar(ind + width, avg_times, label="Flex")
             # Plot FW_Time_ms bars
-            sns.lineplot(
-                data=benchmark_data,
-                x="batch_seqlen",
-                y="FW_Time_ms",
-                hue="impl_config", # Use combined hue
-                ax=ax1,style='impl_config',markers=True
-            )
+            #sns.barplot(
+            #    data=benchmark_data,
+            #    x="batch_seqlen",
+            #    y="FW_Time_ms",
+            #    hue="impl_config", # Use combined hue
+            #    ax=ax1,style='impl_config',markers=True
+            #)
             ax1.set_xlabel("(Batch Size, Sequence Length)")
             
             # Add row label
@@ -230,8 +279,12 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
                 ax1.set_ylabel(f"Time (ms) for {label}", fontsize=12)
             else:
                 ax1.yaxis.get_label().set_visible(False)
-                
-            ax1.set_title(f"{benchmark}", fontsize=12)
+            
+            title = benchmark[0].upper() + benchmark[1:].lower()
+            title = " ".join([t[0].upper() + t[1:].lower() for t in title.split(' ')])
+            if "Prefix Lm" == title:
+                title = "PrefixLM"
+            ax1.set_title(f"{title}", fontsize=12)
             ax1.tick_params(
                 axis='x',
                 rotation=90,
@@ -251,41 +304,39 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
                 (speedup_df["Benchmark"] == benchmark) &
                 (speedup_df["group_size"] == group_size)
             ]
-            speedup_map = {}
-            for _, row in bench_speedup_df.iterrows():
-                key = (row["batch_seqlen"], row["impl_config"])
-                speedup_map[key] = row["Speedup"]
 
+            speedup_map = {}
+            
             # Get x-tick labels
             xtick_labels = [label.get_text() for label in ax1.get_xticklabels()]
             
             # Get legend labels for containers
             h, l = ax1.get_legend_handles_labels()
 
-            # Iterate over bar containers
-            for container, label in zip(ax1.containers, l):
-                # Only add labels to "Flashlight" bars
-                if "Flashlight" in label:
-                    # Iterate over bars in this container
-                    for bar_index, bar in enumerate(container):
-                        # Find the corresponding x-label
-                        x_label = xtick_labels[bar_index]
+            # # Iterate over bar containers
+            # for container, label in zip(ax1.containers, l):
+            #     # Only add labels to "Flashlight" bars
+            #     if "Flashlight" in label:
+            #         # Iterate over bars in this container
+            #         for bar_index, bar in enumerate(container):
+            #             # Find the corresponding x-label
+            #             x_label = xtick_labels[bar_index]
                         
-                        # Find the speedup value
-                        key = (x_label, label)
-                        if key in speedup_map:
-                            speedup_val = speedup_map[key]
-                            height = bar.get_height()
+            #             # Find the speedup value
+            #             key = (x_label, label)
+            #             if key in speedup_map:
+            #                 speedup_val = speedup_map[key]
+            #                 height = bar.get_height()
                             
-                            # Add text label
-                            ax1.text(bar.get_x() + bar.get_width() / 2.0, 
-                                     height, 
-                                     f'{speedup_val:.2f}x', 
-                                     ha='center', 
-                                     va='bottom', 
-                                     fontsize=12, 
-                                    #  rotation=90,
-                                     color='black')
+            #                 # Add text label
+            #                 ax1.text(bar.get_x() + bar.get_width() / 2.0, 
+            #                          height, 
+            #                          f'{speedup_val:.2f}x', 
+            #                          ha='center', 
+            #                          va='bottom', 
+            #                          fontsize=12, 
+            #                         #  rotation=90,
+            #                          color='black')
 
     # Create a single legend
     if handles1:
