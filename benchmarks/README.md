@@ -12,6 +12,13 @@ scripts/install_third_party_dependencies.sh
 
 
 ## Running benchmarks
+Copy and place the benchmarks `benchmark_openfold.py` and `benchmark_openfold_fl.py` to the `openfold` directory.
+
+Add Flashlight to your Path
+```
+export PATH=<FLASHLIGHT PATH>:$PATH
+```
+
 ```
 # Baseline
 
