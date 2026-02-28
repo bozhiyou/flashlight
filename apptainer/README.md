@@ -1,0 +1,65 @@
+# Apptainer image for MLSys'26 Artifact Evaluation
+
+The image provides the environment (CUDA, PyTorch, dependencies). The codebase runs from your host repository via automatic bind mounts.
+
+Before building or running the image, first load Apptainer (required on TACC):
+
+```bash
+module load tacc-apptainer/1.4.1
+```
+
+## Quick Start (via Makefile)
+
+A `Makefile` in this directory automates build and run. It uses `$SCRATCH/flashlight.sif` when `$SCRATCH` is set (to avoid workspace disk quota). From the `apptainer/` directory, you can run the entire artifact evaluation in one step:
+
+```bash
+make all          # Loads module, builds container, runs AE, and points to outputs
+```
+
+Or run steps individually:
+
+```bash
+make image        # Build the container
+make run          # Run full artifact evaluation (requires GPU)
+make interactive  # Interactive shell in the container (requires GPU)
+```
+
+## Build
+
+From the **repository root**. Write the SIF to `$SCRATCH` to avoid workspace disk quota:
+
+```bash
+apptainer build --notest $SCRATCH/flashlight.sif apptainer/flashlight.def
+```
+
+To also run the built-in smoke test during build (needs no GPU):
+
+```bash
+apptainer build $SCRATCH/flashlight.sif apptainer/flashlight.def
+```
+
+### (Optional) Verify GPU visibility
+
+```bash
+apptainer exec --nv --unsquash $SCRATCH/flashlight.sif nvidia-smi
+```
+
+## Run
+
+The artifact requires GPUs; use `--nv` for host NVIDIA driver access. On TACC, squashfuse may time out, so use `--unsquash` to extract the SIF to a temp sandbox:
+
+```bash
+apptainer run --nv --unsquash $SCRATCH/flashlight.sif
+```
+
+Interactive shell:
+
+```bash
+apptainer shell --nv --unsquash $SCRATCH/flashlight.sif
+```
+
+## Contents
+
+- **flashlight.def** — Apptainer definition (base: PyTorch 2.5.0 with CUDA 12.1; default run is `run_artifact_eval.sh`).
+- **run_artifact_eval.sh** — Entrypoint script; runs `make -C benchmarks all` inside the container.
+- **Makefile** — Host-side build and run targets for reviewers.

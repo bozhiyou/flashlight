@@ -27,3 +27,7 @@ root with `PYTHONPATH=.` so that `monkeypatch`, `attention_variants`, and
 PYTHONPATH=. python tests/test_causal.py
 PYTHONPATH=. python benchmarks/run_fig4a_diff_attn.py
 ```
+
+# Artifact Evaluation (Apptainer Image on TACC)
+
+Follow [apptainer/README.md](apptainer/README.md).

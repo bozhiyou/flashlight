@@ -1,0 +1,40 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
+
+%post
+    export PIP_ROOT_USER_ACTION=ignore
+    # apt-get setuid fails in TACC's unprivileged builds; conda does not require setuid
+    conda install -y -n base git
+    pip install --no-cache-dir numpy nvidia-ml-py tabulate pandas seaborn matplotlib
+    git clone https://github.com/meta-pytorch/attention-gym.git /tmp/attention-gym
+    (cd /tmp/attention-gym && git checkout 6a65742f && pip install --no-cache-dir .)
+    rm -rf /tmp/attention-gym
+
+%runscript
+    exec bash "$PWD/apptainer/run_artifact_eval.sh" "$@"
+
+%environment
+    export PATH="/opt/conda/bin:$PATH"
+    export PYTHONHOME="/opt/conda"
+    export LD_PRELOAD=
+    export PYTHONUNBUFFERED=1
+    export PROMPT_COMMAND=
+    unset __vsc_prompt_cmd_original
+
+%test
+    # Clean env: no TACC xalt (LD_PRELOAD), no CUDA init on build nodes, PYTHONHOME for stdlib
+    env -i PATH=/opt/conda/bin:/usr/bin:/bin PYTHONHOME=/opt/conda \
+        CUDA_VISIBLE_DEVICES= LD_PRELOAD= \
+        /opt/conda/bin/python -c "import torch; import attn_gym; print('torch', torch.__version__)"
+
+%labels
+    Author Bozhi You (youbozhi@cs.utexas.edu)
+    Version 2.5.0
+    MLSys.26.Artifact true
+
+%help
+    Apptainer image for MLSys'26 Artifact Evaluation.
+    Base: PyTorch 2.5.0 with CUDA 12.1.
+    Provides the environment (CUDA, PyTorch, dependencies).
+    The codebase is executed directly from the host's directory via mount.
+    Run from the repository root: apptainer run --nv --unsquash $SCRATCH/flashlight.sif
