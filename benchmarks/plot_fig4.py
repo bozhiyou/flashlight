@@ -1,14 +1,20 @@
+import os
+import sys
+import argparse
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-import sys
-import argparse
 
 def load_and_prepare_data(diff_a100_csv, diff_h100_csv, evo_a100_csv, evo_h100_csv):
     """
     Loads and preprocesses benchmark data from A100 and H100 CSV files.
     """
+    bench_dir = os.path.dirname(os.path.abspath(__file__))
+    diff_a100_csv = os.path.join(bench_dir, diff_a100_csv) if not os.path.isabs(diff_a100_csv) else diff_a100_csv
+    diff_h100_csv = os.path.join(bench_dir, diff_h100_csv) if not os.path.isabs(diff_h100_csv) else diff_h100_csv
+    evo_a100_csv = os.path.join(bench_dir, evo_a100_csv) if not os.path.isabs(evo_a100_csv) else evo_a100_csv
+    evo_h100_csv = os.path.join(bench_dir, evo_h100_csv) if not os.path.isabs(evo_h100_csv) else evo_h100_csv
     data_sources = {
         'DiffAttn': {'A100': diff_a100_csv, 'H100': diff_h100_csv},
         'Evoformer':  {'A100': evo_a100_csv,  'H100': evo_h100_csv}
@@ -181,10 +187,10 @@ def plot_bar_charts(combined_df, speedup_df, benchmark_configs, gpus):
 def main():
     parser = argparse.ArgumentParser(description="Plot benchmark results for attention mechanisms across GPUs.")
     parser.add_argument('--plot', type=str, choices=['bar'], default='bar', help="Plot type. Default is 'bar'.")
-    parser.add_argument('--diff-attn-a100', type=str, default='diff_attn_a100_freq_capped.csv', help="CSV for DiffAttn on A100.")
-    parser.add_argument('--diff-attn-h100', type=str, default='diff_attn_h100_freq_capped.csv', help="CSV for DiffAttn on H100.")
-    parser.add_argument('--evo-attn-a100', type=str, default='evo_attn_a100_freq_capped.csv', help="CSV for Evoformer on A100.")
-    parser.add_argument('--evo-attn-h100', type=str, default='evo_attn_h100_freq_capped.csv', help="CSV for Evoformer on H100.")
+    parser.add_argument('--diff-attn-a100', type=str, default='results/diff_attn_a100_freq_capped.csv', help="CSV for DiffAttn on A100.")
+    parser.add_argument('--diff-attn-h100', type=str, default='results/diff_attn_h100_freq_capped.csv', help="CSV for DiffAttn on H100.")
+    parser.add_argument('--evo-attn-a100', type=str, default='results/evo_attn_a100_freq_capped.csv', help="CSV for Evoformer on A100.")
+    parser.add_argument('--evo-attn-h100', type=str, default='results/evo_attn_h100_freq_capped.csv', help="CSV for Evoformer on H100.")
     args = parser.parse_args()
 
     combined_df, speedup_df, benchmark_configs, gpus = load_and_prepare_data(

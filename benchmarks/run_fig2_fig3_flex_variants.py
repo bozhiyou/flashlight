@@ -2,24 +2,12 @@
 examples: https://github.com/pytorch-labs/attention-gym/tree/6a65742f/examples/benchmark.py#L29-L41
 """
 import argparse
-import collections
 import os
 from functools import lru_cache
 
 import torch
 import torch._dynamo.config
 torch._dynamo.config.cache_size_limit = 65536
-
-###########
-# formatting
-###########
-from tabulate import tabulate, simple_separated_format
-csv = simple_separated_format(',')
-
-Result = collections.namedtuple('Result',
-    ["Implementation", "FW_Time_ms", "FW_TFLOPS", 
-     #"BW_Time_ms", "BW_TFLOPS", "Total_Time_ms", "Total_TFLOPS"
-    ])
 
 
 ###########
@@ -118,34 +106,21 @@ def _torch_compile_attn(enable_flashlight=False):
         from monkeypatch import disable_flashattention_replacement
         disable_flashattention_replacement()
 
-    from tests.test_vanilla import attention_pytorch
-    from tests.test_alibi import attention_pytorch_alibi, generate_alibi_bias_pytorch
-    from tests.test_softcap import attention_softcapped
-    from tests.test_causal import attention_pytorch_causal
-    from tests.test_sliding_window import attention_pytorch_sliding_window
-    from tests.test_prefix_lm import attention_pytorch_prefix_lm
-    from tests.test_document_mask import attention_pytorch_document_mask, create_document_id
+    from attention_variants.vanilla import attention_pytorch
+    from attention_variants.alibi import attention_pytorch_alibi, generate_alibi_bias_pytorch
+    from attention_variants.softcap import attention_softcapped
+    from attention_variants.causal import attention_pytorch_causal
+    from attention_variants.sliding_window import attention_pytorch_sliding_window
+    from attention_variants.prefix_lm import attention_pytorch_prefix_lm
+    from attention_variants.document_mask import attention_pytorch_document_mask, create_document_id
 
     # compile after patches are applied
-    from tests.test_vanilla import attention_pytorch
     attention_pytorch = torch.compile(dynamic=False)(attention_pytorch)
-
-    from tests.test_alibi import attention_pytorch_alibi, generate_alibi_bias_pytorch
     attention_pytorch_alibi = torch.compile(dynamic=False)(attention_pytorch_alibi)
-
-    from tests.test_softcap import attention_softcapped
     attention_softcapped = torch.compile(dynamic=False)(attention_softcapped)
-
-    from tests.test_causal import attention_pytorch_causal
     attention_pytorch_causal = torch.compile(dynamic=False)(attention_pytorch_causal)
-
-    from tests.test_sliding_window import attention_pytorch_sliding_window
     attention_pytorch_sliding_window = torch.compile(dynamic=False)(attention_pytorch_sliding_window)
-
-    from tests.test_prefix_lm import attention_pytorch_prefix_lm, get_prefix_lm_mask
     attention_pytorch_prefix_lm = torch.compile(dynamic=False)(attention_pytorch_prefix_lm)
-
-    from tests.test_document_mask import attention_pytorch_document_mask, create_document_id
     attention_pytorch_document_mask = torch.compile(dynamic=False)(attention_pytorch_document_mask)
 
     return {
@@ -172,21 +147,10 @@ def _torch_compile_attn(enable_flashlight=False):
     }
 
 
-from _utils import Config, run_benchmark, run_test, attention_nflop
-
-class SubList(list):
-    """Hierarchical list for result collection.
-    Item appended to a sublist will also be appended to the parent list.
-    """
-    def sublist(self):
-        sublist = SubList()
-        setattr(sublist, '_parent', self)
-        return sublist
-
-    def append(self, item):
-        if hasattr(self, '_parent'):
-            getattr(self, '_parent').append(item)
-        return super().append(item)
+from _utils import (
+    Config, Result, SubList, run_benchmark, attention_nflop,
+    write_results_csv, print_results,
+)
 
 def main(args, benchmark_registry):
     all_results = SubList()
@@ -233,23 +197,9 @@ def main(args, benchmark_registry):
                     for t in time_ms if isinstance(time_ms, list) else [time_ms]:
                         result = Result(attention_name, t, tflops)
                         results.append([*result, *config])
-                # Print results for this config
-                print(
-                    tabulate(
-                        results,
-                        headers=Result._fields + Config._fields,
-                        tablefmt="grid",
-                    )
-                )
+                print_results(results)
 
-    headers = Result._fields + Config._fields
-    with open(f"{os.path.dirname(__file__)}/{args.output}.csv", 'w') as f:
-        f.write(tabulate(
-            all_results,
-            headers=headers,
-            colalign=[None for _ in headers],
-            tablefmt=csv,
-        ))
+    write_results_csv(all_results, os.path.join(os.path.dirname(__file__), f"{args.output}.csv"))
 
 if __name__ == "__main__":
     torch.set_default_device("cuda")

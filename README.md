@@ -16,3 +16,14 @@ Need to build from source for other cuda versions.
 ```
 pip install -e .
 ```
+
+## Running scripts without installing
+
+If you prefer not to install the package, run all scripts from the repository
+root with `PYTHONPATH=.` so that `monkeypatch`, `attention_variants`, and
+`tests` are importable:
+
+```bash
+PYTHONPATH=. python tests/test_causal.py
+PYTHONPATH=. python benchmarks/run_fig4a_diff_attn.py
+```

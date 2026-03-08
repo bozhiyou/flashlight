@@ -3,22 +3,10 @@ reference: https://github.com/microsoft/unilm/tree/master/Diff-Transformer
 configs: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L74-L78
 """
 import argparse
-import collections
 import os
 
 import torch._dynamo.config
 torch._dynamo.config.cache_size_limit = 65536
-
-###########
-# formatting
-###########
-from tabulate import tabulate, simple_separated_format
-csv = simple_separated_format(',')
-
-Result = collections.namedtuple('Result',
-    ["Implementation", "FW_Time_ms", "FW_TFLOPS", 
-     #"BW_Time_ms", "BW_TFLOPS", "Total_Time_ms", "Total_TFLOPS"
-    ])
 
 
 ###########
@@ -38,27 +26,18 @@ def apply_patch():
 apply_patch()
 
 
-from tests import test_diffattn
+from attention_variants import diff_attn
 
 BENCHMARK_REGISTRY = {
-    'diffattn': test_diffattn.diffattn,
-    'diffattn_compiled': torch.compile(dynamic=False)(test_diffattn.diffattn)
+    'diffattn': diff_attn.diffattn,
+    'diffattn_compiled': torch.compile(dynamic=False)(diff_attn.diffattn)
 }
 
 
-from _utils import Config, run_benchmark, run_test
-
-class SubList(list):
-    """Hierarchical list for result collection."""
-    def sublist(self):
-        sublist = SubList()
-        setattr(sublist, '_parent', self)
-        return sublist
-
-    def append(self, item):
-        if hasattr(self, '_parent'):
-            getattr(self, '_parent').append(item)
-        return super().append(item)
+from _utils import (
+    Config, Result, SubList, run_benchmark,
+    write_results_csv, print_results,
+)
 
 def main(args, benchmark_registry):
     all_results = SubList()
@@ -94,28 +73,14 @@ def main(args, benchmark_registry):
                     # continue
 
                     # try:
-                    res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, make_qkv=test_diffattn.make_input)
+                    res = run_benchmark(config, attention_name, attention_func, flops=flop_fwd, make_qkv=diff_attn.make_input)
                     # except:
                     #     res = (float('nan'), float('nan'))
                     result = Result(attention_name, *res)
                     results.append([*result, *config])
-                # Print results for this config
-                print(
-                    tabulate(
-                        results,
-                        headers=Result._fields + Config._fields,
-                        tablefmt="grid",
-                    )
-                )
+                print_results(results)
 
-    headers = Result._fields + Config._fields
-    with open(f"{os.path.dirname(__file__)}/diff_attn.csv", 'w') as f:
-        f.write(tabulate(
-            all_results,
-            headers=headers,
-            colalign=[None for _ in headers],
-            tablefmt=csv,
-        ))
+    write_results_csv(all_results, os.path.join(os.path.dirname(__file__), "results", "diff_attn.csv"))
 
 if __name__ == "__main__":
     torch.set_default_device("cuda")
