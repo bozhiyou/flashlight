@@ -52,20 +52,7 @@ make fig4       # DiffAttn + Evoformer               (Figure 4)
 
 ## Expected runtime
 
-Wall-clock times measured on a single A100-PCIE-40GB (default configs, no SM frequency cap):
-
-| Script | Flag | Approximate time |
-|---|---|---|
-| `run_fig2_fig3_flex_variants.py` | `--flashlight` | ~35 min |
-| `run_fig2_fig3_flex_variants.py` | `--flex` | ~7 min |
-| `run_fig2_fig3_flex_variants.py` | `--flex --no-mask-cache` | ~5 min |
-| `run_fig2_fig3_flex_variants.py` | `--torch.compile` | ~7 min |
-| `run_fig4_diff_attn.py` | | ~14 min |
-| `run_fig4_evoformer.py` | | ~9 min |
-| Plotting scripts | | < 1 min (CPU) |
-| **Total (`make all`)** | | **~80 min** |
-
-First runs include `torch.compile` compilation overhead; subsequent runs with a warm inductor cache are faster.
+End-to-end wall-clock time for the default AE workflow (via `./scripts/run_mlsys26_ae_local.sh`) is approximately **15 minutes** on an A100-class GPU in our test environment. Runtimes on other recent NVIDIA GPUs may differ modestly, but the qualitative trends and relative speedups between systems remain the same. Note that the first run includes compilation overhead for `torch.compile` and Flashlight; subsequent runs with a warm TorchInductor cache are typically faster.
 
 ## Output
 
