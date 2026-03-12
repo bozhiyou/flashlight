@@ -1,36 +1,51 @@
 import os
-import sys
 import argparse
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-def load_and_prepare_data(diff_a100_csv, diff_h100_csv, evo_a100_csv, evo_h100_csv):
+REFERENCE = "results/reference"
+
+def load_and_prepare_data(diff_csvs, evo_csvs):
     """
-    Loads and preprocesses benchmark data from A100 and H100 CSV files.
+    Loads and preprocesses benchmark data for DiffAttn and Evoformer.
+
+    Each list of CSVs can contain results for one or both GPUs. If a GPU
+    (A100/H100) is missing for a given benchmark, the corresponding reference
+    CSV from ``results/reference/`` is loaded and used instead.
     """
-    bench_dir = os.path.dirname(os.path.abspath(__file__))
-    diff_a100_csv = os.path.join(bench_dir, diff_a100_csv) if not os.path.isabs(diff_a100_csv) else diff_a100_csv
-    diff_h100_csv = os.path.join(bench_dir, diff_h100_csv) if not os.path.isabs(diff_h100_csv) else diff_h100_csv
-    evo_a100_csv = os.path.join(bench_dir, evo_a100_csv) if not os.path.isabs(evo_a100_csv) else evo_a100_csv
-    evo_h100_csv = os.path.join(bench_dir, evo_h100_csv) if not os.path.isabs(evo_h100_csv) else evo_h100_csv
-    data_sources = {
-        'DiffAttn': {'A100': diff_a100_csv, 'H100': diff_h100_csv},
-        'Evoformer':  {'A100': evo_a100_csv,  'H100': evo_h100_csv}
+    reference_sources = {
+        "DiffAttn": {"A100": "diff_attn_a100.csv", "H100": "diff_attn_h100.csv"},
+        "Evoformer": {"A100": "evo_attn_a100.csv", "H100": "evo_attn_h100.csv"},
     }
-    
+    input_csvs = {"DiffAttn": diff_csvs, "Evoformer": evo_csvs}
+
+
     all_dfs = []
-    try:
-        for benchmark_name, files in data_sources.items():
-            for gpu_type, file_path in files.items():
-                df = pd.read_csv(file_path)
-                df['GPU'] = gpu_type
-                df['Benchmark'] = benchmark_name 
+    for benchmark_name, csv_paths in input_csvs.items():
+        # Drop reference entries for GPUs that appear in input CSVs.
+        missing_refs = reference_sources[benchmark_name].copy()
+
+        for path in csv_paths:
+            try:
+                df = pd.read_csv(path)
+                df["GPU"] = df["GPU"].astype(str).str.upper()
+                df["Benchmark"] = benchmark_name
                 all_dfs.append(df)
-    except FileNotFoundError as e:
-        print(f"Error: {e}. Please ensure all CSV files are in the correct directory.")
-        sys.exit(1)
+
+                for gpu in df["GPU"].unique():
+                    missing_refs.pop(gpu, None)
+            except FileNotFoundError:
+                pass  # Ignore missing input CSVs; they will be filled from reference.
+
+        # Load reference CSVs for any missing GPUs.
+        for gpu, ref_file in missing_refs.items():
+            ref_path = os.path.join(os.path.dirname(__file__), REFERENCE, ref_file)
+            ref_df = pd.read_csv(ref_path)
+            ref_df["GPU"] = ref_df["GPU"].astype(str).str.upper()
+            ref_df["Benchmark"] = benchmark_name
+            all_dfs.append(ref_df)
 
     raw_df = pd.concat(all_dfs, ignore_index=True)
 
@@ -183,18 +198,38 @@ def plot_bar_charts(combined_df, speedup_df, benchmark_configs, gpus):
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
     print(f"Bar plot saved to '{output_filename}'")
 
-
 def main():
     parser = argparse.ArgumentParser(description="Plot benchmark results for attention mechanisms across GPUs.")
     parser.add_argument('--plot', type=str, choices=['bar'], default='bar', help="Plot type. Default is 'bar'.")
-    parser.add_argument('--diff-attn-a100', type=str, default='results/diff_attn_a100_freq_capped.csv', help="CSV for DiffAttn on A100.")
-    parser.add_argument('--diff-attn-h100', type=str, default='results/diff_attn_h100_freq_capped.csv', help="CSV for DiffAttn on H100.")
-    parser.add_argument('--evo-attn-a100', type=str, default='results/evo_attn_a100_freq_capped.csv', help="CSV for Evoformer on A100.")
-    parser.add_argument('--evo-attn-h100', type=str, default='results/evo_attn_h100_freq_capped.csv', help="CSV for Evoformer on H100.")
+    parser.add_argument(
+        '--diff-attn',
+        type=str,
+        nargs='+',
+        default=[os.path.join(REFERENCE, "diff_attn_a100.csv"),
+                 os.path.join(REFERENCE, "diff_attn_h100.csv")],
+        help=(
+            "One or more CSVs for DiffAttn (with a GPU column). "
+            "If either A100 or H100 is missing, the corresponding reference "
+            "CSV from results/reference/ is used."
+        ),
+    )
+    parser.add_argument(
+        '--evo-attn',
+        type=str,
+        nargs='+',
+        default=[os.path.join(REFERENCE, "evo_attn_a100.csv"),
+                 os.path.join(REFERENCE, "evo_attn_h100.csv")],
+        help=(
+            "One or more CSVs for Evoformer (with a GPU column). "
+            "If either A100 or H100 is missing, the corresponding reference "
+            "CSV from results/reference/ is used."
+        ),
+    )
     args = parser.parse_args()
 
     combined_df, speedup_df, benchmark_configs, gpus = load_and_prepare_data(
-        args.diff_attn_a100, args.diff_attn_h100, args.evo_attn_a100, args.evo_attn_h100
+        args.diff_attn,
+        args.evo_attn,
     )
 
     plot_bar_charts(combined_df, speedup_df, benchmark_configs, gpus)

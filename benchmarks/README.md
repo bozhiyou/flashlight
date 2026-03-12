@@ -24,8 +24,8 @@ make fig4       # DiffAttn + Evoformer               (Figure 4)
 | Paper figure | Data script | Plot script | Output |
 |---|---|---|---|
 | **Fig. 2 / 3** — FlexAttention-supported variants (H100 / A100) | `run_fig2_fig3_flex_variants.py` | `plot_fig2_fig3.py` | `results/fig2_fig3.png` |
-| **Fig. 4 (left)** — Differential Attention | `run_fig4a_diff_attn.py` | `plot_fig4.py` | `results/fig4.png` |
-| **Fig. 4 (right)** — Evoformer / IPA | `run_fig4b_evoformer.py` | `plot_fig4.py` | `results/fig4.png` |
+| **Fig. 4 (left)** — Differential Attention | `run_fig4_diff_attn.py` | `plot_fig4.py` | `results/fig4.png` |
+| **Fig. 4 (right)** — Evoformer / IPA | `run_fig4_evoformer.py` | `plot_fig4.py` | `results/fig4.png` |
 
 `run_fig2_fig3_flex_variants.py` is run once per system (FlashLight, FlexAttention, torch.compile); see the Makefile targets or the flags below:
 
@@ -43,18 +43,29 @@ make fig4       # DiffAttn + Evoformer               (Figure 4)
   ```bash
   sudo nvidia-smi -lgc 1290,1290   # adjust if your steady-state differs
   ```
+  **No sudo (e.g. TACC):** If you cannot run `nvidia-smi -lgc`, set `FL_GPU_CLOCK_FREQ_MHZ` so the benchmark warmup targets that frequency instead. `make data` and the Apptainer runscript default it to `1290`. Override if needed:
+  ```bash
+  FL_GPU_CLOCK_FREQ_MHZ=1290 make data
+  # or export FL_GPU_CLOCK_FREQ_MHZ=1290
+  ```
 - **Software:** Python 3.12, PyTorch 2.5.0, Triton 3.1.0, CUDA 12.9.
 
 ## Expected runtime
 
-Wall-clock estimates on a single GPU (default configs). **TODO: fill in measured times before submission.**
+Wall-clock times measured on a single A100-PCIE-40GB (default configs, no SM frequency cap):
 
-| Script | Approximate time |
-|---|---|
-| `run_fig2_fig3_flex_variants.py` (per system) | TBD |
-| `run_fig4a_diff_attn.py` | TBD |
-| `run_fig4b_evoformer.py` | TBD |
-| Plotting scripts | < 1 min (CPU) |
+| Script | Flag | Approximate time |
+|---|---|---|
+| `run_fig2_fig3_flex_variants.py` | `--flashlight` | ~35 min |
+| `run_fig2_fig3_flex_variants.py` | `--flex` | ~7 min |
+| `run_fig2_fig3_flex_variants.py` | `--flex --no-mask-cache` | ~5 min |
+| `run_fig2_fig3_flex_variants.py` | `--torch.compile` | ~7 min |
+| `run_fig4_diff_attn.py` | | ~14 min |
+| `run_fig4_evoformer.py` | | ~9 min |
+| Plotting scripts | | < 1 min (CPU) |
+| **Total (`make all`)** | | **~80 min** |
+
+First runs include `torch.compile` compilation overhead; subsequent runs with a warm inductor cache are faster.
 
 ## Output
 
@@ -70,7 +81,16 @@ Key qualitative expectations (from Sections 4.2–4.3):
 - **Fig. 2/3:** FlashLight is competitive with or faster than FlexAttention for score_mod variants; for block_mask variants, FlexAttention kernel is faster but block-mask creation overhead makes FlashLight faster end-to-end.
 - **Fig. 4:** FlashLight is always faster than torch.compile. Evoformer speedups are 5× or more (Section 4.3).
 
-**TODO:** commit reference CSVs to `results/reference/` so reviewers can compare against known-good outputs.
+### Reference results (Figure 4)
+
+Static reference CSVs for Fig. 4 live in `results/reference/` and are committed to the repo. Note that all of these reference results were collected with SM frequencies capped (as described in the Hardware Requirements section using `nvidia-smi`) to ensure stable run-to-run measurements:
+
+| File | Description |
+|------|-------------|
+| `diff_attn_a100.csv` | DiffAttn benchmark on A100 |
+| `diff_attn_h100.csv` | DiffAttn benchmark on H100 |
+| `evo_attn_a100.csv` | Evoformer benchmark on A100 |
+| `evo_attn_h100.csv` | Evoformer benchmark on H100 |
 
 ## Dependencies
 

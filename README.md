@@ -25,7 +25,7 @@ root with `PYTHONPATH=.` so that `monkeypatch`, `attention_variants`, and
 
 ```bash
 PYTHONPATH=. python tests/test_causal.py
-PYTHONPATH=. python benchmarks/run_fig4a_diff_attn.py
+PYTHONPATH=. python benchmarks/run_fig4_diff_attn.py
 ```
 
 # Artifact Evaluation (Apptainer Image on TACC)
