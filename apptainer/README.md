@@ -58,6 +58,14 @@ Interactive shell:
 apptainer shell --nv --unsquash $SCRATCH/flashlight.sif
 ```
 
+### Simulated frequency capping
+
+The runscript sets `FL_GPU_CLOCK_FREQ_MHZ=1290` by default so benchmarks warm up to that SM frequency when `sudo nvidia-smi -lgc` is unavailable (e.g. on TACC). To override:
+
+```bash
+apptainer run --nv --unsquash --env FL_GPU_CLOCK_FREQ_MHZ=1350 $SCRATCH/flashlight.sif
+```
+
 ## Contents
 
 - **flashlight.def** — Apptainer definition (base: PyTorch 2.5.0 with CUDA 12.1; default run is `run_artifact_eval.sh`).
