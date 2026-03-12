@@ -248,11 +248,19 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             speedup = []
             runs = 20
             categories = benchmark_data['batch_seqlen'].unique()
+            
+            has_miss = not flex_cache_miss.empty
+            
             for i in range(0, len(flex_cache_hit.FW_Time_ms), runs):
                 hit_avg_times += [sum(list(flex_cache_hit.FW_Time_ms)[i:i+runs])/runs]
-                miss_times += [sum(list(flex_cache_miss.FW_Time_ms)[i:i+runs])/runs]
-                mask_avg_times += [miss_times[-1] - hit_avg_times[-1]]
-                std += [float(np.std(list(flex_cache_miss.FW_Time_ms)[i:i+runs]))]
+                if has_miss:
+                    miss_times += [sum(list(flex_cache_miss.FW_Time_ms)[i:i+runs])/runs]
+                    mask_avg_times += [miss_times[-1] - hit_avg_times[-1]]
+                    std += [float(np.std(list(flex_cache_miss.FW_Time_ms)[i:i+runs]))]
+                else:
+                    miss_times += [hit_avg_times[-1]]
+                    mask_avg_times += [0.0]
+                    std += [float(np.std(list(flex_cache_hit.FW_Time_ms)[i:i+runs]))]
             
             flex_kernel_bars = ax1.bar(ind+width, hit_avg_times, width, label="FlexAttention (Kernel)")
             flex_mask_bars = ax1.bar(ind+width, mask_avg_times, width, bottom=hit_avg_times, yerr=std, ecolor='black',capsize=2, label="FlexAttention (Block Mask)")
