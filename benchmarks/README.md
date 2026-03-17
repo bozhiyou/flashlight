@@ -17,6 +17,7 @@ Performance benchmarks for FlashLight attention variants.
 | FlashLight | `--flashlight` | `results/all.csv` |
 | FlexAttention (cache hit) | `--flex` | `results/all_flex.csv` |
 | FlexAttention (cache miss) | `--flex --no-mask-cache` | `results/all_flexnocache.csv` |
+| FlashInfer | `--flashinfer` | `results/all_flashinfer.csv` |
 | torch.compile | `--torch.compile` | `results/all_torchcompile.csv` |
 
 ## Hardware requirements

@@ -23,7 +23,8 @@ all: data figures
 FLEX_SCRIPT   := run_flex_variants.py
 FLEX_CSVS     := results/all.csv \
                  results/all_flex.csv \
-                 results/all_flexnocache.csv
+                 results/all_flexnocache.csv \
+                 results/all_flashinfer.csv
                  # results/all_torchcompile.csv
 FLEX_PLOT     := plot_flex_variants.py
 
@@ -35,6 +36,9 @@ results/all_flex.csv:
 
 results/all_flexnocache.csv:
 	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --flex --no-mask-cache --output results/all_flexnocache
+
+results/all_flashinfer.csv:
+	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --flashinfer --output results/all_flashinfer
 
 # results/all_torchcompile.csv:
 # 	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --torch.compile --output results/all_torchcompile

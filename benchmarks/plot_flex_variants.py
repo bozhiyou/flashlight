@@ -7,7 +7,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
-def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv):
+def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv, flashinfer_csv=None):
     """
     Loads and preprocesses the benchmark data from CSV files.
     """
@@ -16,6 +16,8 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
     flex_csv = os.path.join(bench_dir, flex_csv) if not os.path.isabs(flex_csv) else flex_csv
     flexnocache_csv = os.path.join(bench_dir, flexnocache_csv) if not os.path.isabs(flexnocache_csv) else flexnocache_csv
     torchcompile_csv = os.path.join(bench_dir, torchcompile_csv) if not os.path.isabs(torchcompile_csv) else torchcompile_csv
+    if flashinfer_csv is not None:
+        flashinfer_csv = os.path.join(bench_dir, flashinfer_csv) if not os.path.isabs(flashinfer_csv) else flashinfer_csv
     benchmark_names = {
         "full": "vanilla",
         "full_with_alibi": "ALiBi",
@@ -53,12 +55,30 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
     flexnocache_df["Implementation"] = "Flex (Cache Miss)"
     # flexnocache_df["FW_Time_ms"] = flexnocache_df["FW_Time_ms"].replace(-1, float('nan'))
 
+    # Optional: FlashInfer
+    if flashinfer_csv is not None:
+        try:
+            flashinfer_df = pd.read_csv(flashinfer_csv)
+        except FileNotFoundError:
+            print(f"INFO: FlashInfer data not found at '{flashinfer_csv}'; skipping.")
+            flashinfer_df = pd.DataFrame(columns=ours_df.columns)
+    else:
+        flashinfer_df = pd.DataFrame(columns=ours_df.columns)
+
+    if not flashinfer_df.empty:
+        flashinfer_df = flashinfer_df.rename(columns={"Implementation": "Benchmark"})
+        flashinfer_df["Benchmark"] = flashinfer_df["Benchmark"].str.replace("flashinfer_", "")
+        flashinfer_df["Implementation"] = "FlashInfer"
+
     if not torchcompile_df.empty:
         torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
         torchcompile_df["Implementation"] = "torch.compile"
         dfs_to_concat = [ours_df, flex_df, flexnocache_df, torchcompile_df]
     else:
         dfs_to_concat = [ours_df, flex_df, flexnocache_df]
+
+    if not flashinfer_df.empty:
+        dfs_to_concat.append(flashinfer_df)
 
     combined_df = pd.concat(dfs_to_concat, ignore_index=True)
     combined_df['Benchmark'] = combined_df['Benchmark'].replace(benchmark_names)
@@ -117,7 +137,7 @@ def plot_line_charts(combined_df, speedup_df, benchmarks):
             style="nheads_headdim",
             markers=True,
             ax=ax1,
-            palette={"Flashlight": "blue", "Flex (Cache Hit)": "green", "Flex (Cache Miss)": "orange", "torch.compile": "red"},
+            palette={"Flashlight": "blue", "Flex (Cache Hit)": "green", "Flex (Cache Miss)": "orange", "torch.compile": "red", "FlashInfer": "purple"},
             dashes=dashes_nhead_headdim,
         )
         ax1.set_xlabel("(Batch Size, Sequence Length)")
@@ -226,19 +246,23 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
 
             assert not benchmark_data.empty
             
+            flashinfer_data = benchmark_data[benchmark_data["Implementation"] == "FlashInfer"]
+            has_flashinfer = not flashinfer_data.empty
+            n_groups = 3 if has_flashinfer else 2
+            width = 0.8 / n_groups
+
             flashlight_data = benchmark_data[benchmark_data["Implementation"] == "Flashlight"]
             avg_times = []
             runs = 20
             categories = benchmark_data['batch_seqlen'].unique()
             ind = np.array(list(range(len(categories))))
-            width = 0.3
             std = []
             for i in range(0, len(flashlight_data.FW_Time_ms), runs):
                 avg_times += [sum(list(flashlight_data.FW_Time_ms)[i:i+runs])/runs]
                 std += [float(np.std(list(flashlight_data.FW_Time_ms)[i:i+runs]))]
             flash_bar = ax1.bar(ind, avg_times, width, label="Flashlight")
             ax1.errorbar(ind, avg_times, yerr=std, fmt='none', ecolor='black',capsize=2)
-            
+
             flex_cache_hit = benchmark_data[benchmark_data["Implementation"] == "Flex (Cache Hit)"]
             flex_cache_miss = benchmark_data[benchmark_data["Implementation"] == "Flex (Cache Miss)"]
             hit_avg_times = []
@@ -261,25 +285,40 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
                     miss_times += [hit_avg_times[-1]]
                     mask_avg_times += [0.0]
                     std += [float(np.std(list(flex_cache_hit.FW_Time_ms)[i:i+runs]))]
-            
+
             flex_kernel_bars = ax1.bar(ind+width, hit_avg_times, width, label="FlexAttention (Kernel)")
             flex_mask_bars = ax1.bar(ind+width, mask_avg_times, width, bottom=hit_avg_times, yerr=std, ecolor='black',capsize=2, label="FlexAttention (Block Mask)")
-            # ax1.errorbar(ind+width, mask_avg_times, bottom=hit_avg_times, yerr=std, fmt='none', ecolor='black',capsize=2)
 
             speedups = []
             for flash,flex in zip(avg_times, miss_times):
                 speedups += [flex/flash]
-            
+
             for speedup, kernel_bar, mask_bar in zip(speedups, flex_kernel_bars, flex_mask_bars):
-                ax1.text(kernel_bar.get_x() + kernel_bar.get_width() / 2.0, 
+                ax1.text(kernel_bar.get_x() + kernel_bar.get_width() / 2.0,
                          kernel_bar.get_height() + mask_bar.get_height()+0.2, f'{speedup:.2f}x',
-                         ha='center', 
-                         va='bottom', 
-                         fontsize=12, 
+                         ha='center',
+                         va='bottom',
+                         fontsize=12,
                          rotation=90,
                          color='black')
-                                 
-            ax1.set_xticks(ind)
+
+            # Optional: FlashInfer bars
+            if has_flashinfer:
+                fi_avg_times = []
+                fi_std = []
+                for i in range(0, len(flashinfer_data.FW_Time_ms), runs):
+                    fi_avg_times += [sum(list(flashinfer_data.FW_Time_ms)[i:i+runs])/runs]
+                    fi_std += [float(np.std(list(flashinfer_data.FW_Time_ms)[i:i+runs]))]
+                ax1.bar(ind+2*width, fi_avg_times, width, label="FlashInfer", color="purple")
+                ax1.errorbar(ind+2*width, fi_avg_times, yerr=fi_std, fmt='none', ecolor='black', capsize=2)
+
+                # Add speedup labels (FlashInfer / Flashlight)
+                for j, (flash_t, fi_t) in enumerate(zip(avg_times, fi_avg_times)):
+                    fi_speedup = fi_t / flash_t
+                    ax1.text(ind[j] + 2*width, fi_t + 0.2, f'{fi_speedup:.2f}x',
+                             ha='center', va='bottom', fontsize=12, rotation=90, color='black')
+
+            ax1.set_xticks(ind + width * (n_groups - 1) / 2)
             ax1.set_xticklabels(categories)
             
             # ax1.bar(ind + width, avg_times, label="Flex")
@@ -367,7 +406,7 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
              labels1[x] = l.replace("\n(16, 64)", "").strip()
              if "Flex" in labels1[x] and "FlexAttention" not in labels1[x]:
                  labels1[x] = labels1[x].replace("Flex", "FlexAttention")
-         fig.legend(handles1, labels1, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=5)
+         fig.legend(handles1, labels1, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=len(labels1))
 
 
     #plt.suptitle("Flex-able Benchmarks (Bar Plot with Speedup)", y=1.02)
@@ -412,10 +451,19 @@ def main():
         default='results/all_torchcompile.csv',
         help="CSV file containing all torch.compile results. Default is 'results/all_torchcompile.csv'."
     )
+    parser.add_argument(
+        '--flashinfer',
+        type=str,
+        default='results/all_flashinfer.csv',
+        help="CSV file containing FlashInfer results. Default is 'results/all_flashinfer.csv'."
+    )
     args = parser.parse_args()
 
     # Load and process data
-    combined_df, speedup_df, benchmarks = load_and_prepare_data(args.flashlight, args.flex, args.flex_no_cache, args.torch_compile)
+    combined_df, speedup_df, benchmarks = load_and_prepare_data(
+        args.flashlight, args.flex, args.flex_no_cache, args.torch_compile,
+        flashinfer_csv=args.flashinfer,
+    )
 
     # Generate the chosen plot
     if args.plot == 'line':

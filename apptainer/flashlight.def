@@ -6,6 +6,7 @@ From: pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
     # apt-get setuid fails in TACC's unprivileged builds; conda does not require setuid
     conda install -y -n base git
     pip install --no-cache-dir numpy nvidia-ml-py tabulate pandas seaborn matplotlib
+    pip install --no-cache-dir flashinfer-python==0.2.5 -i https://flashinfer.ai/whl/cu121/torch2.5/
     git clone https://github.com/meta-pytorch/attention-gym.git /tmp/attention-gym
     (cd /tmp/attention-gym && git checkout 6a65742f && pip install --no-cache-dir .)
     rm -rf /tmp/attention-gym
@@ -25,7 +26,7 @@ From: pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
     # Clean env: no TACC xalt (LD_PRELOAD), no CUDA init on build nodes, PYTHONHOME for stdlib
     env -i PATH=/opt/conda/bin:/usr/bin:/bin PYTHONHOME=/opt/conda \
         CUDA_VISIBLE_DEVICES= LD_PRELOAD= \
-        /opt/conda/bin/python -c "import torch; import attn_gym; print('torch', torch.__version__)"
+        /opt/conda/bin/python -c "import torch; import attn_gym; import flashinfer; print('torch', torch.__version__, 'flashinfer', flashinfer.__version__)"
 
 %labels
     Author Bozhi You (youbozhi@cs.utexas.edu)

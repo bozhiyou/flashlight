@@ -37,6 +37,8 @@ ATTN_GYM_DIR="${DEPS_DIR}/attention-gym"
 ATTN_GYM_COMMIT="6a65742f"
 
 TORCH_WHL_INDEX_URL="${TORCH_WHL_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+CUDA_TAG="${TORCH_WHL_INDEX_URL##*/}"                       # e.g. "cu121"
+FLASHINFER_WHL_INDEX_URL="https://flashinfer.ai/whl/${CUDA_TAG}/torch2.5/"
 FL_GPU_CLOCK_FREQ_MHZ="${FL_GPU_CLOCK_FREQ_MHZ:-1290}"
 
 step "Creating/using virtualenv at .venv"
@@ -63,6 +65,11 @@ fi
 (cd "${ATTN_GYM_DIR}" && git fetch --all --tags >/dev/null 2>&1 || true)
 (cd "${ATTN_GYM_DIR}" && git checkout "${ATTN_GYM_COMMIT}")
 (cd "${ATTN_GYM_DIR}" && uv pip install --python "${PY}" -e .)
+
+step "Installing FlashInfer 0.2.5"
+echo "FlashInfer index-url: ${FLASHINFER_WHL_INDEX_URL}"
+(cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
+  "flashinfer-python==0.2.5" --index-url "${FLASHINFER_WHL_INDEX_URL}")
 
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
   "numpy<2.3.0" pandas seaborn matplotlib tabulate nvidia-ml-py)

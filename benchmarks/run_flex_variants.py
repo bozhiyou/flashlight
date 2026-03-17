@@ -167,7 +167,9 @@ def main(args, benchmark_registry):
                         continue
                     assert callable(attention_func), attention_name
                     print(attention_name)
-                    if mask_mod := FLEX_MASK_REGISTRY.get(attention_name, None) or FLEX_MASK_REGISTRY.get(f"flex_{attention_name}", None):
+                    # Map FlashInfer variant names to their Flex mask equivalents for sparsity-aware flop calculation
+                    _mask_key = attention_name.replace("flashinfer_", "flex_", 1) if attention_name.startswith("flashinfer_") else attention_name
+                    if mask_mod := FLEX_MASK_REGISTRY.get(_mask_key, None) or FLEX_MASK_REGISTRY.get(f"flex_{attention_name}", None):
                         sparsity = create_block_mask(mask_mod(config), 1, 1, seqlen, seqlen).sparsity()
                         flop_fwd = (100 - sparsity) / 100 * attention_nflop(batch_size, seqlen, nheads, headdim, causal=False, mode="fwd")
                     else:
@@ -229,6 +231,7 @@ if __name__ == "__main__":
     _targets = parser.add_argument_group("targets")
     _targets.add_argument("--flex", action='store_true', help="benchmark FlexAttention")
     _targets.add_argument("--flashlight", action='store_true', help="benchmark Flashlight")
+    _targets.add_argument("--flashinfer", action='store_true', help="benchmark FlashInfer")
     _targets.add_argument("--torch.compile", action='store_true', help="benchmark torch.compile")
     _devs = parser.add_argument_group("dev-options")
     _devs.add_argument("--filter", type=str, nargs="+", default=[], help="keywords of variant to benchmark")
@@ -251,6 +254,10 @@ if __name__ == "__main__":
         else:
             flex_registry = FLEX_ATTENTION_REGISTRY
         main(args, flex_registry)
+
+    if args.flashinfer:
+        from attention_variants.flashinfer import FLASHINFER_ATTENTION_REGISTRY
+        main(args, FLASHINFER_ATTENTION_REGISTRY)
 
     if getattr(args, 'torch.compile', False):
         main(args, _torch_compile_attn())
