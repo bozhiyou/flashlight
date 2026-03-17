@@ -36,10 +36,11 @@ BENCHMARK_REGISTRY = {
 
 from _utils import (
     Config, Result, SubList, run_benchmark,
-    write_results_csv, print_results,
+    write_results_csv, print_results, get_gpu_suffix,
 )
 
 def main(args, benchmark_registry):
+    gpu_label = get_gpu_suffix().upper() if get_gpu_suffix() != "unknown" else "unknown"
     all_results = SubList()
     for group_size in [1]:
         for headdim in args.headdim:
@@ -77,10 +78,11 @@ def main(args, benchmark_registry):
                     # except:
                     #     res = (float('nan'), float('nan'))
                     result = Result(attention_name, *res)
-                    results.append([*result, *config])
+                    results.append([*result, *config, gpu_label])
                 print_results(results)
 
-    write_results_csv(all_results, os.path.join(os.path.dirname(__file__), "results", "diff_attn.csv"))
+    out_dir = os.path.join(os.path.dirname(__file__), "results")
+    write_results_csv(all_results, os.path.join(out_dir, "diff_attn.csv"), extra_headers=["GPU"])
 
 if __name__ == "__main__":
     torch.set_default_device("cuda")

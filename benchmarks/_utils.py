@@ -272,9 +272,29 @@ def print_results(results):
     ))
 
 
-def write_results_csv(all_results, output_path):
-    """Write benchmark results to a CSV file."""
-    headers = Result._fields + Config._fields
+def get_gpu_suffix():
+    """Return 'a100' or 'h100' for output naming; 'unknown' if detection fails."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        name = pynvml.nvmlDeviceGetName(h)
+        if name is None:
+            return "unknown"
+        name = name.decode() if isinstance(name, bytes) else str(name)
+        pynvml.nvmlShutdown()
+        if "A100" in name.upper():
+            return "a100"
+        if "H100" in name.upper():
+            return "h100"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def write_results_csv(all_results, output_path, extra_headers=()):
+    """Write benchmark results to a CSV file. extra_headers (e.g. ['GPU']) extend the header and each row must have matching columns."""
+    headers = Result._fields + Config._fields + tuple(extra_headers)
     parent = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(parent, exist_ok=True)
     with open(output_path, 'w') as f:
