@@ -30,10 +30,15 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
         ours_df = pd.read_csv(ours_csv)
         flex_df = pd.read_csv(flex_csv)
         flexnocache_df = pd.read_csv(flexnocache_csv)
+    except FileNotFoundError as e:
+        print(f"Error: {e}. Make sure '{ours_csv}', '{flex_csv}', and '{flexnocache_csv}' are in the same directory.")
+        sys.exit(1)
+
+    try:
         torchcompile_df = pd.read_csv(torchcompile_csv)
     except FileNotFoundError as e:
-        print(f"Error: {e}. Make sure '{ours_csv}', '{flex_csv}', '{flexnocache_csv}', and '{torchcompile_csv}' are in the same directory.")
-        sys.exit(1)
+        print(f"INFO: torch.compile data not found; skipping.")
+        torchcompile_df = pd.DataFrame(columns=ours_df.columns)
 
     ours_df = ours_df.rename(columns={"Implementation": "Benchmark"})
     ours_df["Implementation"] = "Flashlight"
@@ -48,10 +53,14 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv)
     flexnocache_df["Implementation"] = "Flex (Cache Miss)"
     # flexnocache_df["FW_Time_ms"] = flexnocache_df["FW_Time_ms"].replace(-1, float('nan'))
 
-    torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
-    torchcompile_df["Implementation"] = "torch.compile"
+    if not torchcompile_df.empty:
+        torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
+        torchcompile_df["Implementation"] = "torch.compile"
+        dfs_to_concat = [ours_df, flex_df, flexnocache_df, torchcompile_df]
+    else:
+        dfs_to_concat = [ours_df, flex_df, flexnocache_df]
 
-    combined_df = pd.concat([ours_df, flex_df, flexnocache_df], ignore_index=True)
+    combined_df = pd.concat(dfs_to_concat, ignore_index=True)
     combined_df['Benchmark'] = combined_df['Benchmark'].replace(benchmark_names)
     combined_df["nheads_kv"] = combined_df["nheads"] // combined_df["group_size"]
 
