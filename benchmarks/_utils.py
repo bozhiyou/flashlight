@@ -1,8 +1,10 @@
 import collections
 import math
+import os
 from typing import Literal
 
 import torch
+from tabulate import tabulate, simple_separated_format
 
 
 ###
@@ -21,6 +23,9 @@ def attention_nflop(batch: int, seqlen: int, headdim: int, nheads: int, causal: 
 
 Config = collections.namedtuple('Config',
     ['batch_size', 'seqlen', 'nheads', 'headdim', 'group_size', 'dropout_p'])
+
+Result = collections.namedtuple('Result',
+    ["Implementation", "FW_Time_ms", "FW_TFLOPS"])
 
 
 ##################
@@ -234,4 +239,49 @@ def run_torch_profiler(config, attention_name: str, attention_func,  *, flops: i
     # print(cats)
     print("^^^kernels^^^")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+
+###########
+# Result collection & output
+###########
+
+csv_format = simple_separated_format(',')
+
+
+class SubList(list):
+    """Hierarchical list for result collection.
+    Item appended to a sublist will also be appended to the parent list.
+    """
+    def sublist(self):
+        sublist = SubList()
+        setattr(sublist, '_parent', self)
+        return sublist
+
+    def append(self, item):
+        if hasattr(self, '_parent'):
+            getattr(self, '_parent').append(item)
+        return super().append(item)
+
+
+def print_results(results):
+    """Pretty-print benchmark results for a single config."""
+    print(tabulate(
+        results,
+        headers=Result._fields + Config._fields,
+        tablefmt="grid",
+    ))
+
+
+def write_results_csv(all_results, output_path):
+    """Write benchmark results to a CSV file."""
+    headers = Result._fields + Config._fields
+    parent = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(parent, exist_ok=True)
+    with open(output_path, 'w') as f:
+        f.write(tabulate(
+            all_results,
+            headers=headers,
+            colalign=[None for _ in headers],
+            tablefmt=csv_format,
+        ))
 

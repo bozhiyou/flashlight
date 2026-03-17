@@ -1,35 +1,61 @@
-- FlexAttention examples benchmark: `variants.py`
+# Benchmarks
 
-NOTE: comment `apply_patch()` for FlexAttention benchmark
+Performance benchmarks for FlashLight attention variants.
 
-- Diff-Attn benchmark: `diff_attn.py`
-- Evoformer/IPA benchmark: `evo_attn.py`
+## Scripts
 
----
-To observe generated kernel, set `TORCHINDUCTOR_CACHE_DIR=<path>` and find the kernel in `<path>` (default to `/tmp/torchinductor_${USER}`).
+| Category | Data script | Plot script |
+|---|---|---|
+| FlexAttention-supported variants | `run_flex_variants.py` | `plot_flex_variants.py` |
+| Differential Attention | `run_diff_attn.py` | `plot_custom_variants.py` |
+| Evoformer / IPA | `run_evoformer.py` | `plot_custom_variants.py` |
 
-Autotune space is hardcoded in `monkeypatch/fusion/triton_heuristics.py`. Configuration interface is TODO.
+`run_flex_variants.py` is run once per system (FlashLight, FlexAttention, torch.compile); see the flags below:
 
+| System | Flag | Default output |
+|---|---|---|
+| FlashLight | `--flashlight` | `results/all.csv` |
+| FlexAttention (cache hit) | `--flex` | `results/all_flex.csv` |
+| FlexAttention (cache miss) | `--flex --no-mask-cache` | `results/all_flexnocache.csv` |
+| torch.compile | `--torch.compile` | `results/all_torchcompile.csv` |
 
-# Benchmark Dependencies
-```
-# common dependency
-nvidia-ml-py    # for frequency-aware warmup; previously `pynvml`
-tabulate        # for pretty print
+## Hardware requirements
 
-# variants.py
-attention-gym   # need to install from source
-```
+- **GPU:** NVIDIA A100 or H100 (one GPU).
+- **SM frequency:** for reproducible results, cap SM frequency to the GPU's steady-state clock:
+  ```bash
+  sudo nvidia-smi -lgc 1290,1290   # adjust if your steady-state differs
+  ```
+- **Software:** Python 3.12, PyTorch 2.5.0, Triton 3.1.0, CUDA 12.9.
 
-## Install `attention-gym` (6a65742f)
-```
+## Output
+
+- **CSVs** go to `results/` (gitignored).
+- **Figures** are saved by the plot scripts to the working directory.
+- Plot scripts read from `results/` by default; paths are configurable via CLI flags.
+
+## Verification
+
+For reproducible results, cap SM frequency. With frequency capping, run-to-run variance on the same machine should be within 1 % standard deviation (20 runs, 10 warm-up).
+
+## Dependencies
+
+**Common (pip):**
+
+- `nvidia-ml-py` — frequency-aware warmup
+- `tabulate` — pretty-print
+- `pandas`, `seaborn`, `matplotlib` — plotting
+
+**For `run_flex_variants.py` only:** `attention-gym` (install from source):
+
+```bash
 git clone https://github.com/meta-pytorch/attention-gym.git
-```
-```
 cd attention-gym && git checkout 6a65742f
-```
-```
 pip install .
-# ...
-# Successfully installed attn_gym-0.0.4.dev15+g6a65742f7.d20251022
+# → attn_gym-0.0.4.dev15+g6a65742f7.d20251022
 ```
+
+## Development
+
+- **Inductor cache:** set `TORCHINDUCTOR_CACHE_DIR=<path>` to inspect generated kernels (default: `/tmp/torchinductor_${USER}`).
+- **Autotune:** search space is hardcoded in `monkeypatch/fusion/triton_heuristics.py`; configuration interface is TODO.

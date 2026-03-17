@@ -1,15 +1,21 @@
+import os
+import sys
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
-import sys
 import numpy as np
 
 def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv):
     """
     Loads and preprocesses the benchmark data from CSV files.
     """
+    bench_dir = os.path.dirname(os.path.abspath(__file__))
+    ours_csv = os.path.join(bench_dir, ours_csv) if not os.path.isabs(ours_csv) else ours_csv
+    flex_csv = os.path.join(bench_dir, flex_csv) if not os.path.isabs(flex_csv) else flex_csv
+    flexnocache_csv = os.path.join(bench_dir, flexnocache_csv) if not os.path.isabs(flexnocache_csv) else flexnocache_csv
+    torchcompile_csv = os.path.join(bench_dir, torchcompile_csv) if not os.path.isabs(torchcompile_csv) else torchcompile_csv
     benchmark_names = {
         "full": "vanilla",
         "full_with_alibi": "ALiBi",
@@ -368,26 +374,26 @@ def main():
     parser.add_argument(
         '--flashlight',
         type=str,
-        default='all.csv',
-        help="CSV file containing all Flashlight results. Default is 'all.csv'."
+        default='results/all.csv',
+        help="CSV file containing all Flashlight results. Default is 'results/all.csv'."
     )
     parser.add_argument(
         '--flex',
         type=str,
-        default='all_flex.csv',
-        help="CSV file containing all FlexAttention with a mask cache results. Default is 'all_flex.csv'."
+        default='results/all_flex.csv',
+        help="CSV file containing all FlexAttention with a mask cache results. Default is 'results/all_flex.csv'."
     )
     parser.add_argument(
         '--flex-no-cache',
         type=str,
-        default='all_flexnocache.csv',
-        help="CSV file containing all FlexAttention without a mask cache results. Default is 'all_flexnocache.csv'."
+        default='results/all_flexnocache.csv',
+        help="CSV file containing all FlexAttention without a mask cache results. Default is 'results/all_flexnocache.csv'."
     )
     parser.add_argument(
         '--torch-compile',
         type=str,
-        default='all_torchcompile.csv',
-        help="CSV file containing all torch.comnpile results. Default is 'all_torchcompile.csv'."
+        default='results/all_torchcompile.csv',
+        help="CSV file containing all torch.compile results. Default is 'results/all_torchcompile.csv'."
     )
     args = parser.parse_args()
 
