@@ -246,7 +246,11 @@ if __name__ == "__main__":
         create_block_mask_cached = create_block_mask
 
     if args.flex:
-        main(args, FLEX_ATTENTION_REGISTRY)
+        if not args.mask_cache:
+            flex_registry = {k: v for k, v in FLEX_ATTENTION_REGISTRY.items() if k in FLEX_MASK_REGISTRY}
+        else:
+            flex_registry = FLEX_ATTENTION_REGISTRY
+        main(args, flex_registry)
 
     if getattr(args, 'torch.compile', False):
         main(args, _torch_compile_attn())
