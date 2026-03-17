@@ -37,27 +37,94 @@ import time
 from torch._inductor.runtime.benchmarking import benchmarker
 
 def warmup_max(fn, n=10):
-    """Heat the GPU until max frequency."""
+    """
+    Heat the GPU until a target SM frequency (best effort).
+
+    On shared systems (or under power/thermal limits), the GPU may plateau below
+    the requested frequency. A strict loop can hang, so this uses bounded exits.
+
+    Targets:
+    - If ``FL_GPU_CLOCK_FREQ_MHZ`` is set, treat it as the requested target.
+    - Otherwise, use the device-reported max SM clock (NVML).
+    - Clamp the requested target to the device-reported max.
+
+    Exit conditions:
+    - Success when within 98% of target.
+    - Plateau when the best clock fails to improve by >= 5 MHz for several rounds.
+    - Timeout after 60 seconds.
+    """
     assert callable(fn)
     import pynvml
     handle = torch.cuda._get_pynvml_handler()
-    max_freq_MHz = pynvml.nvmlDeviceGetMaxClockInfo(handle, 1)
-    # _, max_power_mW = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
-    last = torch.cuda.clock_rate()
-    retry = 0
-    while last < max_freq_MHz:
+    env_mhz = os.environ.get("FL_GPU_CLOCK_FREQ_MHZ")
+    hw_max_mhz = pynvml.nvmlDeviceGetMaxClockInfo(handle, 1)  # 1 == NVML_CLOCK_SM
+    requested_mhz = int(env_mhz) if env_mhz is not None else hw_max_mhz
+    target_mhz = min(requested_mhz, hw_max_mhz)
+
+    SUCCESS_RATIO = 0.98
+    MIN_IMPROVE_MHZ = 5
+    MAX_SECONDS = 60.0
+    MAX_NO_IMPROVE_ROUNDS = 8
+    SLEEP_S = 0.25
+
+    success_mhz = int(target_mhz * SUCCESS_RATIO)
+
+    start_t = time.time()
+    best_mhz = torch.cuda.clock_rate()
+    no_improve_rounds = 0
+
+    while True:
+        if best_mhz >= success_mhz:
+            break
+        if (time.time() - start_t) >= MAX_SECONDS:
+            print(
+                f"[warmup] timeout after {MAX_SECONDS:.0f}s: best={best_mhz} MHz, "
+                f"target={target_mhz} MHz (requested={requested_mhz} MHz, hw_max={hw_max_mhz} MHz)"
+            )
+            break
+        if no_improve_rounds >= MAX_NO_IMPROVE_ROUNDS:
+            print(
+                f"[warmup] plateau: best={best_mhz} MHz for {MAX_NO_IMPROVE_ROUNDS} rounds, "
+                f"target={target_mhz} MHz (requested={requested_mhz} MHz, hw_max={hw_max_mhz} MHz)"
+            )
+            break
+
+        timed_out = False
         for _ in range(n):
             fn()
-        if torch.cuda.clock_rate() < last:
-            # cannot boost to max freq, maybe for power limit
-            if retry >= 3:
+            if time.time() - start_t >= MAX_SECONDS:
+                timed_out = True
                 break
-            # while torch.cuda.clock_rate() / max_freq_MHz <= pynvml.nvmlDeviceGetPowerUsage(handle) / max_power_mW:
-            print(f"{last} MHz | {pynvml.nvmlDeviceGetPowerUsage(handle) / 1000}W | {pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)}C")
-            time.sleep(4)
-            retry += 1
-        last = torch.cuda.clock_rate()
-    print(f"Warmup finished: {torch.cuda.clock_rate()} MHz")
+
+        if timed_out:
+            print(
+                f"[warmup] timeout after {MAX_SECONDS:.0f}s while heating: "
+                f"best={best_mhz} MHz, target={target_mhz} MHz "
+                f"(requested={requested_mhz} MHz, hw_max={hw_max_mhz} MHz)"
+            )
+            break
+
+        curr_mhz = torch.cuda.clock_rate()
+        if curr_mhz >= best_mhz + MIN_IMPROVE_MHZ:
+            best_mhz = curr_mhz
+            no_improve_rounds = 0
+        else:
+            no_improve_rounds += 1
+            best_mhz = max(best_mhz, curr_mhz)
+
+        try:
+            p_w = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
+            t_c = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            print(
+                f"[warmup] curr={curr_mhz} MHz | best={best_mhz} MHz | "
+                f"target={target_mhz} MHz | {p_w:.0f}W | {t_c}C"
+            )
+        except Exception:
+            print(f"[warmup] curr={curr_mhz} MHz | best={best_mhz} MHz | target={target_mhz} MHz")
+
+        time.sleep(SLEEP_S)
+
+    print(f"Warmup finished: {torch.cuda.clock_rate()} MHz (target {target_mhz} MHz)")
 
 # timer
 def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flush=True, return_mode="mean",
