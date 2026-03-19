@@ -8,17 +8,34 @@ We provide two automated workflows to run the full benchmark suite on a single *
 
 ### Option A: Local run (via `uv`)
 
-This one-command runner creates an isolated `uv` virtual environment, installs all dependencies (including PyTorch 2.5.0 with CUDA 12.1 wheels and a pinned version of `attention-gym`), and runs the end-to-end evaluation:
+This one-command runner creates an isolated `uv` virtual environment, installs all dependencies (including PyTorch 2.5.1 with CUDA 12.4 wheels and a pinned version of `attention-gym`), and runs the end-to-end evaluation:
 
 ```bash
 ./scripts/run_benchmarks_local.sh
 ```
 
+Or use `make` directly:
+
+```bash
+make deps    # install dependencies into .venv
+make bench   # run all benchmarks
+```
+
+Only run vLLM end-to-end benchmark:
+
+```bash
+make deps
+make -C benchmarks vllm_e2e
+```
+
 Optional overrides:
 
 ```bash
-# Torch wheel index (defaults to CUDA 12.1 wheels)
-TORCH_WHL_INDEX_URL=https://download.pytorch.org/whl/cu121 ./scripts/run_benchmarks_local.sh
+# Create venv on a larger filesystem (e.g. limited $HOME disk on TACC)
+make deps VENV_PATH=$(mktemp -d)
+
+# Torch wheel index (defaults to CUDA 12.4 wheels)
+TORCH_WHL_INDEX_URL=https://download.pytorch.org/whl/cu124 ./scripts/run_benchmarks_local.sh
 
 # Simulated frequency capping target (defaults to 1290 MHz)
 FL_GPU_CLOCK_FREQ_MHZ=1290 ./scripts/run_benchmarks_local.sh
@@ -52,14 +69,16 @@ If you wish to explore the code outside the automated workflows, you can install
 
 ```text
 python>3.10,<3.13   # monkey-patching `contextlib.contextmanager` requires `co_qualname` field of `PyCodeObject` introduced in Python 3.11 (bpo-44530)
-torch==2.5.0        # which requires 'python<3.13'
+torch~=2.5          # which requires 'python<3.13'
 numpy               # optional; torch raises `UserWarning: Failed to initialize NumPy: No module named 'numpy'`
+vllm>0.6.3,<0.7.0  # optional; only needed for benchmarks/vllm_e2e_infer.py (0.7+ requires torch 2.6)
+transformers<4.47   # optional; required by vllm 0.6.x (4.47+ removed all_special_tokens_extended)
 ```
 
-To install PyTorch 2.5.0 (e.g., for CUDA 12.1):
+To install PyTorch 2.5.1 (e.g., for CUDA 12.4):
 
 ```bash
-pip install 'torch==2.5.0' --index-url https://download.pytorch.org/whl/cu121  # or cu118, cu124
+pip install 'torch~=2.5' --index-url https://download.pytorch.org/whl/cu124  # or cu118, cu124
 ```
 
 *Note: For other CUDA versions, you may need to build PyTorch from source.*
