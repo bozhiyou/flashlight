@@ -36,8 +36,8 @@ DEPS_DIR="${ROOT_DIR}/.deps"
 ATTN_GYM_DIR="${DEPS_DIR}/attention-gym"
 ATTN_GYM_COMMIT="6a65742f"
 
-TORCH_WHL_INDEX_URL="${TORCH_WHL_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
-CUDA_TAG="${TORCH_WHL_INDEX_URL##*/}"                       # e.g. "cu121"
+TORCH_WHL_INDEX_URL="${TORCH_WHL_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
+CUDA_TAG="${TORCH_WHL_INDEX_URL##*/}"                       # e.g. "cu124"
 FLASHINFER_WHL_INDEX_URL="https://flashinfer.ai/whl/${CUDA_TAG}/torch2.5/"
 FL_GPU_CLOCK_FREQ_MHZ="${FL_GPU_CLOCK_FREQ_MHZ:-1290}"
 
@@ -55,7 +55,7 @@ fi
 step "Installing Python dependencies into .venv"
 echo "PyTorch index-url: ${TORCH_WHL_INDEX_URL}"
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
-  "torch==2.5.0" --index-url "${TORCH_WHL_INDEX_URL}")
+  "torch~=2.5.1" --index-url "${TORCH_WHL_INDEX_URL}")
 
 step "Installing attention-gym (pinned commit ${ATTN_GYM_COMMIT})"
 if [[ ! -d "${ATTN_GYM_DIR}/.git" ]]; then
@@ -70,6 +70,10 @@ step "Installing FlashInfer 0.2.5"
 echo "FlashInfer index-url: ${FLASHINFER_WHL_INDEX_URL}"
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
   "flashinfer-python==0.2.5" --index-url "${FLASHINFER_WHL_INDEX_URL}")
+
+step "Installing vLLM 0.6.6"
+(cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
+  "vllm>0.6.3,<0.7.0" "transformers<4.47")
 
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
   ninja "numpy<2.3.0" pandas seaborn matplotlib tabulate nvidia-ml-py)
@@ -90,4 +94,5 @@ echo "FL_GPU_CLOCK_FREQ_MHZ=${FL_GPU_CLOCK_FREQ_MHZ}"
 step "Done"
 echo "Outputs:"
 echo "  - benchmarks/results/flex_variants.png"
+echo "  - benchmarks/results/vllm_e2e.png"
 echo "  - benchmarks/results/custom_variants.png"

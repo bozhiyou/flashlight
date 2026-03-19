@@ -68,6 +68,6 @@ apptainer run --nv --unsquash --env FL_GPU_CLOCK_FREQ_MHZ=1350 $SCRATCH/flashlig
 
 ## Contents
 
-- **flashlight.def** — Apptainer definition (base: PyTorch 2.5.0 with CUDA 12.1, FlashInfer 0.2.5; default run is `run_benchmarks.sh`).
+- **flashlight.def** — Apptainer definition (base: PyTorch 2.5.1 with CUDA 12.4, FlashInfer 0.2.5; default run is `run_benchmarks.sh`).
 - **run_benchmarks.sh** — Entrypoint script; runs `make -C benchmarks all` inside the container.
 - **Makefile** — Host-side build and run targets.
