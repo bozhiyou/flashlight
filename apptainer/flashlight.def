@@ -1,12 +1,13 @@
 Bootstrap: docker
-From: pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
+From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 %post
     export PIP_ROOT_USER_ACTION=ignore
     # apt-get setuid fails in TACC's unprivileged builds; conda does not require setuid
     conda install -y -n base git
     pip install --no-cache-dir numpy nvidia-ml-py tabulate pandas seaborn matplotlib
-    pip install --no-cache-dir flashinfer-python==0.2.5 -i https://flashinfer.ai/whl/cu121/torch2.5/
+    pip install --no-cache-dir flashinfer-python==0.2.5 -i https://flashinfer.ai/whl/cu124/torch2.5/
+    pip install --no-cache-dir "vllm==0.6.6" "transformers<4.47"
     git clone https://github.com/meta-pytorch/attention-gym.git /tmp/attention-gym
     (cd /tmp/attention-gym && git checkout 6a65742f && pip install --no-cache-dir .)
     rm -rf /tmp/attention-gym
@@ -30,12 +31,12 @@ From: pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
 
 %labels
     Author Bozhi You (youbozhi@cs.utexas.edu)
-    Version 2.5.0
+    Version 2.5.1
     Project FlashLight
 
 %help
     Apptainer image for FlashLight benchmarks.
-    Base: PyTorch 2.5.0 with CUDA 12.1.
+    Base: PyTorch 2.5.1 with CUDA 12.4.
     Provides the environment (CUDA, PyTorch, dependencies).
     The codebase is executed directly from the host's directory via mount.
     Run from the repository root: apptainer run --nv --unsquash $SCRATCH/flashlight.sif

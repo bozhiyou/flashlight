@@ -7,6 +7,7 @@ Performance benchmarks for FlashLight attention variants.
 | Category | Data script | Plot script |
 |---|---|---|
 | FlexAttention-supported variants | `run_flex_variants.py` | `plot_flex_variants.py` |
+| vLLM end-to-end inference | `vllm_e2e_infer.py` | `plot_vllm_e2e.py` |
 | Differential Attention | `run_diff_attn.py` | `plot_custom_variants.py` |
 | Evoformer / IPA | `run_evoformer.py` | `plot_custom_variants.py` |
 
@@ -20,6 +21,18 @@ Performance benchmarks for FlashLight attention variants.
 | FlashInfer | `--flashinfer` | `results/all_flashinfer.csv` |
 | torch.compile | `--torch.compile` | `results/all_torchcompile.csv` |
 
+`vllm_e2e_infer.py` runs a real vLLM generation pipeline with custom attention backends:
+
+| Mode | Flag | Description |
+|---|---|---|
+| Baseline | `--mode baseline` | Unpatched vLLM (control) |
+| FlexAttention | `--mode flex --variant <v>` | Hooks prefill with a FlexAttention variant |
+| FlexAttention (no cache) | `--mode flex --variant <v> --no-mask-cache` | Same, with block-mask caching disabled |
+| Flashlight | `--mode flashlight --variant <v>` | Hooks prefill with a Flashlight-compiled variant |
+| Debug | `--mode debug` | Verify hooks reach the attention layer |
+
+Available variants: `causal`, `sliding_window`, `prefix_lm`, `document_mask`, `full`, `alibi`, `softcap`.
+
 ## Hardware requirements
 
 - **GPU:** NVIDIA A100 or H100 (one GPU).
@@ -32,7 +45,7 @@ Performance benchmarks for FlashLight attention variants.
   FL_GPU_CLOCK_FREQ_MHZ=1290 python benchmarks/run_diff_attn.py
   # or export FL_GPU_CLOCK_FREQ_MHZ=1290
   ```
-- **Software:** Python 3.12, PyTorch 2.5.0, Triton 3.1.0, CUDA 12.9.
+- **Software:** Python 3.12, PyTorch 2.5.1, Triton 3.1.0, CUDA 12.9.
 
 ## Expected runtime
 
@@ -67,7 +80,9 @@ Static reference CSVs live in `results/reference/` and are committed to the repo
 - `tabulate` — pretty-print
 - `pandas`, `seaborn`, `matplotlib` — plotting
 
-**For `run_flex_variants.py` only:** `attention-gym` (install from source):
+**For `vllm_e2e_infer.py` only:** `vllm`
+
+**For `run_flex_variants.py` and `vllm_e2e_infer.py`:** `attention-gym` (install from source):
 
 ```bash
 git clone https://github.com/meta-pytorch/attention-gym.git
