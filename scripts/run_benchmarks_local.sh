@@ -72,7 +72,7 @@ echo "FlashInfer index-url: ${FLASHINFER_WHL_INDEX_URL}"
   "flashinfer-python==0.2.5" --index-url "${FLASHINFER_WHL_INDEX_URL}")
 
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" \
-  "numpy<2.3.0" pandas seaborn matplotlib tabulate nvidia-ml-py)
+  ninja "numpy<2.3.0" pandas seaborn matplotlib tabulate nvidia-ml-py)
 
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" -e .)
 

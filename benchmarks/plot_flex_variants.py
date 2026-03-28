@@ -292,15 +292,20 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             speedups = []
             for flash,flex in zip(avg_times, miss_times):
                 speedups += [flex/flash]
+            
+            speedup_text_kwargs = dict(
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                rotation=90,
+                color="black",
+            )
+            speedup_text_offset = 0.25
 
             for speedup, kernel_bar, mask_bar in zip(speedups, flex_kernel_bars, flex_mask_bars):
                 ax1.text(kernel_bar.get_x() + kernel_bar.get_width() / 2.0,
-                         kernel_bar.get_height() + mask_bar.get_height()+0.2, f'{speedup:.2f}x',
-                         ha='center',
-                         va='bottom',
-                         fontsize=12,
-                         rotation=90,
-                         color='black')
+                         kernel_bar.get_height() + mask_bar.get_height() + speedup_text_offset, f'{speedup:.2f}x', 
+                         **speedup_text_kwargs)
 
             # Optional: FlashInfer bars
             if has_flashinfer:
@@ -315,8 +320,8 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
                 # Add speedup labels (FlashInfer / Flashlight)
                 for j, (flash_t, fi_t) in enumerate(zip(avg_times, fi_avg_times)):
                     fi_speedup = fi_t / flash_t
-                    ax1.text(ind[j] + 2*width, fi_t + 0.2, f'{fi_speedup:.2f}x',
-                             ha='center', va='bottom', fontsize=12, rotation=90, color='black')
+                    ax1.text(ind[j] + 2*width, fi_t + speedup_text_offset, f'{fi_speedup:.2f}x',
+                             **speedup_text_kwargs)
 
             ax1.set_xticks(ind + width * (n_groups - 1) / 2)
             ax1.set_xticklabels(categories)
