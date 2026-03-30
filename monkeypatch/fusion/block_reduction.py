@@ -21,7 +21,7 @@ from torch._inductor.virtualized import V
 from torch._inductor.kernel.bmm import tuned_bmm
 from torch._inductor.scheduler import SchedulerNode
 from torch._inductor.loop_body import LoopBody
-from torch._inductor.codegen.common import SizeArg
+from torch._inductor.codegen.common import DeferredLine, SizeArg
 from torch._inductor.codegen.triton import TritonScheduling, TritonKernel, TritonKernelOverrides
 from torch._inductor.codegen.simd import IterationRangesRoot, IterationRangesEntry, EnableReduction, DisableReduction
 from torch._inductor.optimize_indexing import indexing_dtype_strength_reduction
@@ -298,8 +298,8 @@ def codegen_node_schedule_with_kernel(self: TritonScheduling, node_schedule, ker
             else:
                 with kernel.set_current_node(node):
                     node.decide_inplace_update()
-                    index_vars = kernel.split_and_set_ranges(node.get_ranges())
-                    assert len(index_vars) == len(node.get_ranges())
+                    index_vars = kernel.split_and_set_ranges(node.get_ranges({}))
+                    assert len(index_vars) == len(node.get_ranges({}))
                     all_indexing.update(
                         dict.fromkeys(
                             indexing for indexing in node._body.indexing_from_args(index_vars).values()
@@ -319,7 +319,7 @@ def codegen_node_schedule_with_kernel(self: TritonScheduling, node_schedule, ker
                 with kernel.set_current_node(node):
                     # TODO - use split ranges ?
                     indexing_dtype_strength_reduction(node._body)
-                    index_vars = kernel.split_and_set_ranges(node.get_ranges())
+                    index_vars = kernel.split_and_set_ranges(node.get_ranges({}))
                     node.codegen(index_vars)
 
 
@@ -631,12 +631,24 @@ class RangeTreeExt:
 
 
     def triton_tensor_ndim(self) -> int:
-        """number of blocked dimensions"""
+        """Count of tiled (non-scalar) dimensions in this range tree.
+
+        A BlockedRange with block==1 is a scalar pid (e.g. batch, head)
+        and does not contribute a Triton tensor dimension.  Only ranges
+        whose block is a symbolic tile size (XBLOCK0, RBLOCK, …) count.
+
+        Returns 0 when the tree has no tensor_dim (unused tree).
+        """
         if self.range_tree.tensor_dim is None:
             return 0
         return sum(1 for r in self.ranges if r.numel != 1 and r.block != 1)
 
     def dense_size_list(self) -> list[str]:
+        """Block-size symbols for tiled dimensions, e.g. ['XBLOCK0'].
+
+        Scalar (block==1) dimensions are excluded — they are loop pids,
+        not part of the Triton tensor shape.
+        """
         return [f"{r.block}" for r in self.ranges if r.block != 1]
 
 
@@ -652,8 +664,16 @@ def finalize_indexing(self: TritonKernel, indices: Sequence[sympy.Expr]):
 
 @monkey.patch(TritonKernel)
 def triton_tensor_ndim(self: TritonKernel) -> int:
-    """
-    + poll tree meta for one-to-many tree-to-tensor_dim mapping
+    """Number of Triton tensor dimensions across all range trees.
+
+    Base Inductor: 1 per range tree (each tree = one flat XBLOCK/RBLOCK).
+    Patched: delegates to RangeTreeExt.triton_tensor_ndim() which counts
+    only tiled BlockedRanges (block != 1), so scalar pids (batch, head)
+    contribute 0.  A single tree can contribute 0..N dims.
+
+    Result does NOT vary with inside_reduction — R-tree's tensor_dim
+    stays non-None regardless.  Use dense_size_list() for the
+    inside_reduction-sensitive shape.
     """
     ndim = 0
     for tree in self.range_trees:
@@ -666,26 +686,58 @@ def triton_tensor_ndim(self: TritonKernel) -> int:
     return ndim
 
 
-# @monkey.patch(TritonKernel)
-# def reduction_resize(self: TritonKernel, value):
-#     """resize final reduction result.
-#     - dimmension expansion processed when store
-#     """
-#     ndims = self.triton_tensor_ndim()
-#     if ndims == 1:
-#         return f"triton_helpers.promote_to_tensor({value})"
+@monkey.patch(TritonKernel)
+def store_reduction(self: TritonKernel, name, index, value):
+    """Squeeze keepdim trailing dim before storing a reduction result.
 
-#     return f"{value}"
-#     # sizes = [":"] * ndims
-#     # sizes[-1] = "None"  # assuming one r tree
-#     # return f"{value}[{', '.join(sizes)}]"
+    Base Inductor: store_reduction temporarily sets inside_reduction=False
+    to compute a store-side index (no RBLOCK dim), then emits
+    tl.store(ptr + index, value, mask) as a DeferredLine gated on `name`.
+
+    Problem: dependent reduction fusion (contraction=False, multilane=False
+    in reductionx, _reduction.py:342) initializes accumulators as
+    [XBLOCK0, 1] for loop-body broadcasting.  The store index is [XBLOCK0].
+    Triton rejects the rank mismatch.
+
+    Patched: when triton_tensor_ndim() > 1 (multi-dim blockreduction),
+    reshape value to the store shape (dense_size_list with
+    inside_reduction=False) via a fresh CSE var, keeping the original
+    value intact for other post-loop consumers (e.g. normalization div).
+    For values already at the correct rank (contraction=True path),
+    the reshape is a no-op.
+
+    The reshape uses DeferredLine gated on the same buffer `name` as the
+    store, so it is elided when the store is removed by dead-buffer
+    elimination (e.g. accumulators consumed in-place in a fused kernel).
+    """
+    ndim = self.triton_tensor_ndim()
+    if ndim > 1:
+        assert self.inside_reduction
+        self.inside_reduction = False
+        sizes = self.dense_size_list()   # store shape, e.g. ['XBLOCK0']
+        self.inside_reduction = True
+        squeezed = self.cse.newvar()
+        self.suffix.writeline(
+            DeferredLine(
+                name,
+                f"{squeezed} = tl.reshape({value}, [{', '.join(sizes)}])",
+            )
+        )
+        return monkey.fallback(self, name, index, squeezed)
+    return monkey.fallback(self, name, index, value)
 
 
 @monkey.patch(TritonKernel)
 def dense_size_list(self: TritonKernel) -> list[str]:
-    """dense size/block size list
-    + multiple dense size for a tree
-    + suffix for dense size symbol
+    """Block-size symbols for the Triton tensor shape.
+
+    Base Inductor: one symbol per range tree (e.g. ['XBLOCK', 'RBLOCK']).
+    Patched: delegates to RangeTreeExt.dense_size_list() which returns
+    one symbol per tiled BlockedRange, skipping scalar pids.
+
+    Varies with inside_reduction: R-tree is excluded when
+    inside_reduction=False (line 699), so the result reflects the
+    store-side shape (no RBLOCK).
     """
     sizes = []
     for tree in self.range_trees:
@@ -1437,7 +1489,6 @@ def codegen_kernel(self: TritonKernel, name=None) -> str:
 
     self.triton_meta = triton_meta
 
-    inductor_meta['_has_RBLOCK'] = any('RBLOCK' in a for a in argdefs)
     inductor_meta['block_args'] = {}
     for tree in self.range_trees:
         if tree.prefix == "r" and (self.persistent_reduction or not self.inside_reduction):
@@ -1470,6 +1521,8 @@ def codegen_kernel(self: TritonKernel, name=None) -> str:
         arg = f"{arg}: tl.constexpr"
         if arg not in argdefs:
             argdefs.append(arg)
+
+    inductor_meta['_has_RBLOCK'] = any('RBLOCK' in a for a in argdefs)
 
     self.codegen_body()
 

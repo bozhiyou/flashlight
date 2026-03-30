@@ -1072,11 +1072,37 @@ class ReductionDependency:
 
 
 @monkey.patch(SchedulerNode)
-def get_ranges(self: SchedulerNode, one_shot_ranges: dict[sympy.Integer, sympy.Integer] = {}):
+def get_ranges(self: SchedulerNode, one_shot_ranges: dict[sympy.Integer, sympy.Integer] | None = None):
     """
-    - filter out one-shot ranges
+    Retrieves the iteration/reduction ranges for a :class:`SchedulerNode`.
+
+    This patched method is fully backward-compatible. By default (when `one_shot_ranges` 
+    is `None`), it preserves the original behavior (getter of `self._sizes`) and simply returns the unmodified 
+    iteration ranges `(ranges, reduction_ranges)` for the node.
+
+    Additional Functionality:
+    When `one_shot_ranges` is provided, the method extends the default behavior by filtering 
+    out specific "one-shot" ranges from the returned standard iteration ranges. These 
+    one-shot ranges represent dimensions that are processed "all at once" instead of 
+    being explicitly looped over. The identified one-shot ranges are then stored separately 
+    in the node's `one_shot` attribute for use during kernel generation.
+
+    Args:
+        one_shot_ranges (dict[sympy.Integer, sympy.Integer] | None): A dictionary specifying 
+            the ranges to be treated as one-shot.
+            - Key (prefix): The accumulated size (product) of all dimensions preceding 
+              the one-shot dimension.
+            - Value (range_size): The size of the one-shot dimension itself.
+            Defaults to None.
+
+    Returns:
+        tuple: A tuple `(ranges, reduction_ranges)` where `ranges` contains the standard 
+        iteration ranges (with any active one-shot ranges filtered out), and 
+        `reduction_ranges` remains unmodified.
     """
     ranges, rranges = monkey.fallback(self)
+    if one_shot_ranges is None:
+        return ranges, rranges
     one_shot_ranges.update(getattr(self, 'one_shot', {}))
     if not one_shot_ranges:
         return ranges, rranges
