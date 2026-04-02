@@ -25,7 +25,7 @@ FLEX_CSVS     := results/all.csv \
                  results/all_flex.csv \
                  results/all_flexnocache.csv \
                  results/all_flashinfer.csv
-                 # results/all_torchcompile.csv
+                 # results/all_torchcompile.csv  # optional
 FLEX_PLOT     := plot_flex_variants.py
 
 results/all.csv:
@@ -40,8 +40,8 @@ results/all_flexnocache.csv:
 results/all_flashinfer.csv:
 	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --flashinfer --output results/all_flashinfer
 
-# results/all_torchcompile.csv:
-# 	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --torch.compile --output results/all_torchcompile
+results/all_torchcompile.csv:
+	FL_GPU_CLOCK_FREQ_MHZ=$(FL_GPU_CLOCK_FREQ_MHZ) $(PYTHON) $(FLEX_SCRIPT) --torch.compile --output results/all_torchcompile
 
 # ─── Custom variants (DiffAttn, Evoformer) ───────────────────────────────────
 
