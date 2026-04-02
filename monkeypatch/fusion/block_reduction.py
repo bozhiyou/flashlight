@@ -744,8 +744,9 @@ def dense_size_list(self: TritonKernel) -> list[str]:
         if tree.tensor_dim is None:
             continue
         if treex:= getattr(tree, 'block_meta', None):
-            # treex: RangeTreeExt
-            sizes.extend(treex.dense_size_list())
+            # treex: RangeTreeExt — skip R-tree when outside reduction
+            if tree.prefix != 'r' or self.inside_reduction:
+                sizes.extend(treex.dense_size_list())
             continue
         # fallback to original implementation
         if tree.prefix != 'r' or self.inside_reduction:
@@ -1060,6 +1061,45 @@ def _is_one_shot(var: sympy.Symbol, kernel: TritonKernel) -> bool:
     return kernel.range_tree_nodes[var].expr is var
     # return var not in kernel.range_tree_nodes
 
+
+def _get_effective_dim_layout(kernel: TritonKernel):
+    """Kernel-level global dim layout for all tiled BlockedRanges.
+
+    Assigns a dim index to each tiled (block != 1) BlockedRange across all
+    range trees.  R-tree ranges are excluded when ``kernel.inside_reduction``
+    is False, matching ``dense_size_list`` semantics.
+
+    Dims are assigned in **reverse** ranges-list order so that the
+    ``dims[-i-1]`` broadcasting convention (dim 0 → rightmost position)
+    produces a tensor shape that matches ``dense_size_list`` element-for-
+    element:  the first range in the list (fastest-varying) receives the
+    *highest* dim index → leftmost tensor position, the last range receives
+    dim 0 → rightmost position.
+
+    Returns ``(range_to_dim, global_ndim)`` where *range_to_dim* maps each
+    tiled BlockedRange (or bare tree name for the no-block_meta fallback) to
+    its global dimension index.
+    """
+    # Collect eligible ranges in list order (fastest-varying first).
+    ordered: list = []
+    for tree in kernel.range_trees:
+        if tree.tensor_dim is None:
+            continue
+        if tree.prefix == 'r' and not kernel.inside_reduction:
+            continue
+        treex: RangeTreeExt | None = getattr(tree, 'block_meta', None)
+        if treex:
+            for ran9e in treex.ranges:
+                if ran9e.block != 1:
+                    ordered.append(ran9e)
+        else:
+            ordered.append(tree.name)
+    ndim = len(ordered)
+    # Reverse assignment: first range → highest dim → leftmost tensor position.
+    range_to_dim = {r: ndim - 1 - i for i, r in enumerate(ordered)}
+    return range_to_dim, ndim
+
+
 def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict[sympy.Symbol, int]:
     """
     Maps index variables to their logical block dimension for N-dimensional tiling.
@@ -1080,6 +1120,24 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
     logical 2D layout that can be used to generate broadcastable masks, such as:
     `mask_x0 = (x0 < M)[:, None]` and `mask_x1 = (x1 < N)[None, :]`.
 
+    **Scope-aware dim assignment.**  The ``inside_reduction`` scope boundary
+    determines how dims are assigned — mirroring how ``dense_size_list``
+    already varies with this flag:
+
+    - ``inside_reduction = True`` (reduction loop body): dims are assigned
+      **per load/store index**, with a fresh local counter.  Each load's
+      variables get sequential dim indices (0, 1, …) based on the order
+      they appear in *that* index expression only.  This keeps every
+      ``tl.dot`` operand at exactly rank 2, since each operand's index
+      uses exactly 2 blocked dims (e.g. {x0, r7} for Q, {r7, r2} for K).
+    - ``inside_reduction = False`` (store path / pointwise kernel): dims
+      come from the kernel-level **global layout**
+      (``_get_effective_dim_layout``), so every load/store in the same
+      scope gets consistent positions.  A load that uses only 1 of the
+      kernel's 2 blocked dims (e.g. softmax denominator using only x0)
+      still knows its position in the 2-D broadcast space, avoiding
+      shape-incompatible element-wise ops like ``[XBLOCK, 64] / [XBLOCK]``.
+
     Args:
         self: The TritonKernel instance.
         index: The flattened 1D indexing expression to analyze.
@@ -1088,6 +1146,11 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
         A dictionary mapping each symbolic variable in the index to its
         corresponding logical block dimension index.
     """
+    # Scope determines whether dim indices are per-index or global.
+    use_global_layout = not self.inside_reduction
+    if use_global_layout:
+        range_to_dim, _ = _get_effective_dim_layout(self)
+
     # index vars in order of dimension
     index_vars: tuple[sympy.Symbol]
     if isinstance(index, sympy.Symbol) or not index.args:  # singleton
@@ -1104,46 +1167,46 @@ def get_variable_to_block_dim_map(self: TritonKernel, index: sympy.Expr) -> dict
         assert all(len(arg.free_symbols) <= 1 for arg in index.args), f"{[arg.free_symbols for arg in index.args]}"
         index_vars = tuple(var for arg in index.args for var in arg.free_symbols)  # `args` is (kind of) ordered; `free_symbols` is not
 
-    dim = itertools.count()
+    dim = itertools.count()  # per-index counter (used when inside_reduction)
     _blocked_range_order = dict[RangeTreeExt.BlockedRange, int]()
     var_to_blocked_dim = dict[sympy.Symbol, int]()
 
     for i, var in enumerate(index_vars):
         if var in var_to_blocked_dim:  # Already processed
             continue
-        if _is_one_shot(var, self):  # A "one-shot" range is a dimension that is not iterated over in a loop but is instead processed "all at once" within a single block (e.g., using tl.arange) (conceptually, when block == dense size of the dimension).
-            var_to_blocked_dim[var] = next(dim)  # Assign it a unique block dimension.
-            continue
 
         # Get the extended range tree representation
         tree = self.range_tree_nodes[var].root
-        treex: RangeTreeExt = getattr(tree, 'block_meta', None)
+        treex: RangeTreeExt | None = getattr(tree, 'block_meta', None)
 
         if not treex:
-            # single block size by default
-            # for var in tree.var_list:
-            var_to_blocked_dim[var] = next(dim)
+            if use_global_layout:
+                if tree.name in range_to_dim:
+                    var_to_blocked_dim[var] = range_to_dim[tree.name]
+            else:
+                var_to_blocked_dim[var] = next(dim)
+        elif _is_one_shot(var, self):
+            if use_global_layout:
+                # One-shot vars (e.g. tl.arange(0, 64)) are inserted into
+                # treex.ranges after __init__ via insert_range(); the
+                # var_to_block() closure built at __init__ doesn't track them.
+                ran9e = next((r for r in treex.ranges if var in r.var_list), None)
+                if ran9e is not None and ran9e in range_to_dim:
+                    var_to_blocked_dim[var] = range_to_dim[ran9e]
+            else:
+                var_to_blocked_dim[var] = next(dim)
         else:
             ran9e: RangeTreeExt.BlockedRange = treex.var_to_block(var)
-            if ran9e.block == 1:
-                # This dimension is not tiled (block size is 1). The corresponding loop
-                # variable (e.g., `x2`) will be a scalar within the kernel, representing a
-                # single element for the entire thread block.
-                #
-                # Since it's not tiled, it doesn't get a block dimension index and won't be
-                # part of the N-dimensional block-level mask. Instead, its boundary check
-                # will be a simple scalar guard condition (e.g., `(x2 < B)`).
-                #
-                # For example, an indexing expression `x0[None, :] + x1[:, None] + x2` might
-                # have a combined mask `(x0 < M)[None, :] & (x1 < N)[:, None]` for the tiled
-                # dimensions `x0` and `x1`, while the check for `x2` remains a separate scalar guard.
-                # The final masking will be `(x0 < M)[None, :] & (x1 < N)[:, None] & (x2 < B)`.
-                continue
-            # The bookkeeping `_blocked_range_order` is for the case when a `BlockedRange` has more than one loop vars (which is often the case for pre-fusion scheduler nodes where the block hint is not processed yet).
-            # For example, if a blocked range has var list (x0, x1), presumably they are indexing continuously, so the indexing is `(x0 * s0)[mask] + (x1 * s1)[mask]` with same mask.
-            if ran9e not in _blocked_range_order:
-                _blocked_range_order[ran9e] = next(dim)
-            var_to_blocked_dim[var] = _blocked_range_order[ran9e]
+            if use_global_layout:
+                if ran9e not in range_to_dim:
+                    continue  # scalar pid or excluded R-tree
+                var_to_blocked_dim[var] = range_to_dim[ran9e]
+            else:
+                if ran9e.block == 1:
+                    continue
+                if ran9e not in _blocked_range_order:
+                    _blocked_range_order[ran9e] = next(dim)
+                var_to_blocked_dim[var] = _blocked_range_order[ran9e]
     return var_to_blocked_dim
 
 
@@ -1221,7 +1284,12 @@ def indexing(
     if override_mask is None:
         var_ranges = self.var_ranges()
         var_to_blocked_dim = get_variable_to_block_dim_map(self, index)
-        ndim = len(set(var_to_blocked_dim.values()))
+        # Broadcast ndim: inside the reduction body each load's index
+        # defines its own rank; outside, use the kernel's effective rank.
+        if self.inside_reduction:
+            ndim = len(set(var_to_blocked_dim.values()))
+        else:
+            _, ndim = _get_effective_dim_layout(self)
 
         index = _simplify_subexpression(self, index)
         if ndim <= 1:
@@ -1279,24 +1347,31 @@ def index_to_str(self: TritonKernel, index: sympy.Expr) -> str:
         return index_str
 
     var_to_blocked_dim = get_variable_to_block_dim_map(self, index)
-    ndim = len(set(var_to_blocked_dim.values()))
+    if self.inside_reduction:
+        ndim = len(set(var_to_blocked_dim.values()))
+    else:
+        _, ndim = _get_effective_dim_layout(self)
 
     if ndim <= 1:
         return index_str
+    # Convert each arg through Inductor's sympy→Triton pipeline so that
+    # ModularIndexing, FloorDiv, etc. are rendered as valid Triton code.
+    def _arg_str(arg):
+        return self.kexpr(self.rename_indexing(arg))
     args = []
     for arg in (index.args or (index,)):
         if not arg.free_symbols:  # constant offset
-            args.append(f"{arg}")
+            args.append(_arg_str(arg))
             continue
         assert len(arg.free_symbols) == 1
         var = next(iter(arg.free_symbols))
         if var not in var_to_blocked_dim:
-            args.append(f"{arg}")
+            args.append(_arg_str(arg))
             continue
         i = var_to_blocked_dim[var]
         dims = ["None"] * ndim
         dims[-i-1] = ':'
-        args.append(f"({arg})[{', '.join(dims)}]")
+        args.append(f"({_arg_str(arg)})[{', '.join(dims)}]")
     index_str = ' + '.join(args)
     return index_str
 
