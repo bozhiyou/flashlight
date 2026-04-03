@@ -80,7 +80,7 @@ step "Installing vLLM 0.6.6"
 
 (cd "${ROOT_DIR}" && uv pip install --python "${PY}" -e .)
 
-step "Running benchmarks (same defaults as Apptainer)"
+step "Setting up environment"
 export PYTHONPATH="${ROOT_DIR}"
 export FL_GPU_CLOCK_FREQ_MHZ="${FL_GPU_CLOCK_FREQ_MHZ}"
 export PATH="${VENV_DIR}/bin:${PATH}"
@@ -89,10 +89,8 @@ echo "PATH=${PATH}"
 echo "PYTHONPATH=${PYTHONPATH}"
 echo "FL_GPU_CLOCK_FREQ_MHZ=${FL_GPU_CLOCK_FREQ_MHZ}"
 
+step "Running benchmarks"
 (cd "${ROOT_DIR}" && make -C benchmarks "$@")
 
 step "Done"
-echo "Outputs:"
-echo "  - benchmarks/results/flex_variants.png"
-echo "  - benchmarks/results/vllm_e2e.png"
-echo "  - benchmarks/results/custom_variants.png"
+echo "Outputs are in benchmarks/results/."

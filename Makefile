@@ -40,8 +40,8 @@ all:
 	@$(MAKE) --no-print-directory venv
 	@$(MAKE) --no-print-directory deps
 	@echo "Done installing dependencies"
-	@echo "Now you can run the benchmarks"
-	@echo "  $(MAKE) bench"
+	@echo "Now running the benchmarks"
+	@$(MAKE) bench
 
 # ─── venv ─────────────────────────────────────────────────────────────────────
 
@@ -128,3 +128,5 @@ clean-venv:
 		rm -rf "$$(readlink -f "$(VENV_DIR)")"; \
 	fi
 	rm -rf "$(VENV_DIR)"
+
+clean: clean-venv

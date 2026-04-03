@@ -170,7 +170,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Benchmarks: generated data and local symlinks
-benchmarks/results/
-benchmarks/baselines/
-benchmarks/*.png
+# Generated data
+*.csv
+*.png
+# Reference results (see benchmarks/README.md)
+!benchmarks/results/reference/
+!benchmarks/results/reference/*.csv

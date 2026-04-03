@@ -6,7 +6,7 @@ Flashlight is a compiler-native framework within the PyTorch ecosystem that auto
 
 We provide two automated workflows to run the full benchmark suite on a single **NVIDIA A100 or H100 GPU**. Both generate benchmark results and figures in `benchmarks/results/`.
 
-### Option A: Local run (via `uv`)
+### Option A: All-in-one script
 
 This one-command runner creates an isolated `uv` virtual environment, installs all dependencies (including PyTorch 2.5.1 with CUDA 12.4 wheels and a pinned version of `attention-gym`), and runs the end-to-end evaluation:
 
@@ -14,11 +14,57 @@ This one-command runner creates an isolated `uv` virtual environment, installs a
 ./scripts/run_benchmarks_local.sh
 ```
 
-Or use `make` directly:
+<details>
+<summary>Tips</summary>
+
+* If `uv` fires `warning: Failed to hardlink files; falling back to full copy`, set `UV_CACHE_DIR` to the same filesystem to avoid slow copy.
+
+* To use different torch wheel index (defaults to CUDA 12.4 wheels)
+
+```bash
+TORCH_WHL_INDEX_URL=https://download.pytorch.org/whl/cu121 ./scripts/run_benchmarks_local.sh
+```
+
+* Simulated frequency capping target (defaults to 1290 MHz)
+
+```bash
+FL_GPU_CLOCK_FREQ_MHZ=1290 ./scripts/run_benchmarks_local.sh
+```
+</details>
+
+</details>
+
+
+### Option B: Local run
+
+```bash
+make
+```
+
+<details>
+<summary>Target breakdown</summary>
+
+Install dependencies:
 
 ```bash
 make deps    # install dependencies into .venv
-make bench   # run all benchmarks
+```
+
+When the space of current working directory is limited, create venv on a larger filesystem (useful on shared clusters e.g. TACC):
+```bash
+make deps VENV_PATH=$(mktemp -d)
+```
+
+Run all benchmarks:
+
+```bash
+make bench
+```
+
+Or equivalently:
+
+```bash
+make -C benchmarks
 ```
 
 Only run vLLM end-to-end benchmark:
@@ -27,21 +73,9 @@ Only run vLLM end-to-end benchmark:
 make deps
 make -C benchmarks vllm_e2e
 ```
+</details>
 
-Optional overrides:
-
-```bash
-# Create venv on a larger filesystem (e.g. limited $HOME disk on TACC)
-make deps VENV_PATH=$(mktemp -d)
-
-# Torch wheel index (defaults to CUDA 12.4 wheels)
-TORCH_WHL_INDEX_URL=https://download.pytorch.org/whl/cu124 ./scripts/run_benchmarks_local.sh
-
-# Simulated frequency capping target (defaults to 1290 MHz)
-FL_GPU_CLOCK_FREQ_MHZ=1290 ./scripts/run_benchmarks_local.sh
-```
-
-### Option B: Apptainer (for shared clusters like TACC)
+### Option C: Apptainer (for shared clusters like TACC)
 
 If you are on a cluster where Apptainer is preferred:
 
