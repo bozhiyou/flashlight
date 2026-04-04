@@ -1071,6 +1071,7 @@ class SyntheticWorkload:
 
 
 def main(args: argparse.Namespace) -> None:
+    import torch.cuda
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this benchmark.")
 
@@ -1117,6 +1118,15 @@ def main(args: argparse.Namespace) -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         enable_prefix_caching=args.enable_prefix_caching,
     )
+
+    # Unlimit dynamo compilation cache.  Must be set AFTER vLLM import
+    # because vllm/worker/model_runner.py hardcodes both limits to 128
+    # at module import time.  With dynamic=False each unique sequence
+    # length triggers a new compilation; the low default causes eager
+    # fallback which materializes full attention matrices → OOM.
+    import torch._dynamo.config
+    torch._dynamo.config.cache_size_limit = 10000
+    torch._dynamo.config.accumulated_cache_size_limit = 100000
 
     out_path = _csv_setup(args, workload.csv_fields)
     variant = args.variant if args.mode != "baseline" else "n/a"

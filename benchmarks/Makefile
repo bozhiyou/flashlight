@@ -56,7 +56,7 @@ VLLM_VARIANTS := alibi causal sliding_window
 vllm_e2e_synth:
 	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flashlight --variant $(v);)
 	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v);)
-	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache;)
+	@# $(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache;)
 
 # ─── Mooncake trace-driven benchmark ──────────────────────────────────────────
 
@@ -75,7 +75,7 @@ traces: $(TRACE_DIR)/conversation_trace.jsonl
 $(VLLM_CSV): $(TRACE_DIR)/conversation_trace.jsonl
 	$(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flashlight --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
 	$(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
-	$(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
+	@# $(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
 
 # ─── Custom variants (DiffAttn, Evoformer) ───────────────────────────────────
 
