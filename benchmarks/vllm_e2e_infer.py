@@ -876,8 +876,9 @@ class OnlineTraceWorkload(BaseTraceWorkload):
         )
         engine = llm.llm_engine
         
-        print(f"\n[online trace] mode={self.args.mode}, variant={variant}, "
-              f"requests={len(self.records)}, mask_cache={self.args.mask_cache}")
+        print(f"\n[online trace] mode={self.args.mode}, " + (
+              f"mask_cache={self.args.mask_cache}, " if self.args.mode == "flex" else "") +
+              f"variant={variant}, num_requests={len(self.records)}")
 
         warmup = self.args.warmup
         repeats = self.args.repeats
@@ -898,11 +899,27 @@ class OnlineTraceWorkload(BaseTraceWorkload):
 
             start_time = time.perf_counter()
 
-            while req_idx < n_reqs or engine.has_unfinished_requests():
-                current_time = time.perf_counter() - start_time
+            # --- Simulated-time trace replay ---
+            # We use "simulated time" (sim_time) to pace request submissions
+            # instead of wall-clock time. This decouples submission pacing from
+            # engine speed:
+            #  - Wall-clock is only used for latency/throughput measurement.
+            #  - sim_time advances by the *trace gap* between consecutive
+            #    requests each time we submit one, so the relative arrival
+            #    pattern is preserved regardless of how fast/slow engine.step()
+            #    runs.
+            #  - Between submissions we drain all pending engine work, which
+            #    mirrors how a real async server would schedule: accept a
+            #    request, then process until the next arrival.
+            sim_time = 0.0  # tracks position in the trace timeline
 
-                # Submit requests that have arrived
-                while req_idx < n_reqs and current_time >= self.timestamps[req_idx]:
+            while req_idx < n_reqs or engine.has_unfinished_requests():
+
+                # Submit the next request whose trace timestamp has been
+                # reached in simulated time.  We submit at most one request
+                # per outer-loop iteration so the engine can make progress
+                # between arrivals and we never burst-load the scheduler.
+                if req_idx < n_reqs and sim_time >= self.timestamps[req_idx]:
                     req_id = f"r{r_idx}_req_{req_idx}"
                     prompt_token_ids = prompts[req_idx]["prompt_token_ids"]
                     sp = SamplingParams(max_tokens=self.output_lens[req_idx], temperature=0.0, ignore_eos=True)
@@ -911,10 +928,21 @@ class OnlineTraceWorkload(BaseTraceWorkload):
                         request_id=req_id,
                         prompt={"prompt_token_ids": prompt_token_ids},
                         params=sp,
+                        arrival_time=self.timestamps[req_idx],
                     )
-                    arrival_times[req_id] = current_time
+                    arrival_times[req_id] = time.perf_counter() - start_time
                     req_idx += 1
 
+                    # Advance sim_time to the next request's timestamp so
+                    # we'll submit it on the next iteration (preserving trace
+                    # inter-arrival gaps).  If multiple requests share the
+                    # same timestamp they'll be submitted in consecutive
+                    # iterations with no engine steps in between — fast enough
+                    # to be effectively simultaneous.
+                    if req_idx < n_reqs:
+                        sim_time = self.timestamps[req_idx]
+
+                # Run one engine step to make progress on in-flight requests.
                 if engine.has_unfinished_requests():
                     step_outputs = engine.step()
                     now = time.perf_counter() - start_time
@@ -925,10 +953,16 @@ class OnlineTraceWorkload(BaseTraceWorkload):
                         if out.finished:
                             end_times[req_id] = now
                             output_tokens_dict[req_id] = len(out.outputs[0].token_ids)
-                else:
-                    time_to_next = self.timestamps[req_idx] - (time.perf_counter() - start_time)
-                    if time_to_next > 0:
-                        time.sleep(min(time_to_next, 0.01))
+                            done_idx = int(req_id.rsplit("_", 1)[1])
+                            print(f"\r  [{self.args.mode} {variant}] t={now:.1f}s  done={len(end_times)}/{n_reqs}  "
+                                  f"last_req={{id={done_idx},in={self.input_lens[done_idx]},out={output_tokens_dict[req_id]}}}  ",
+                                  end="", flush=True)
+                elif req_idx < n_reqs:
+                    # No in-flight work and next request hasn't "arrived" yet.
+                    # Jump sim_time forward — no point waiting in a sim.
+                    sim_time = self.timestamps[req_idx]
+
+            print("done")
 
             total_duration = time.perf_counter() - start_time
             ttfts = []
