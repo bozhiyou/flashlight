@@ -116,10 +116,6 @@ bench: | $(PY)
 	$(MAKE) -C benchmarks $(BENCH_ARGS)
 	@echo ""
 	@echo "==> Done"
-	@echo "Outputs:"
-	@echo "  - benchmarks/results/flex_variants.png"
-	@echo "  - benchmarks/results/vllm_e2e.png"
-	@echo "  - benchmarks/results/custom_variants.png"
 
 # ─── clean ────────────────────────────────────────────────────────────────────
 

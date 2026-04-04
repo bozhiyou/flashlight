@@ -4,10 +4,9 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
-def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv, flashinfer_csv=None):
+def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv=None, flashinfer_csv=None):
     """
     Loads and preprocesses the benchmark data from CSV files.
     """
@@ -15,7 +14,8 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv,
     ours_csv = os.path.join(bench_dir, ours_csv) if not os.path.isabs(ours_csv) else ours_csv
     flex_csv = os.path.join(bench_dir, flex_csv) if not os.path.isabs(flex_csv) else flex_csv
     flexnocache_csv = os.path.join(bench_dir, flexnocache_csv) if not os.path.isabs(flexnocache_csv) else flexnocache_csv
-    torchcompile_csv = os.path.join(bench_dir, torchcompile_csv) if not os.path.isabs(torchcompile_csv) else torchcompile_csv
+    if torchcompile_csv is not None:
+        torchcompile_csv = os.path.join(bench_dir, torchcompile_csv) if not os.path.isabs(torchcompile_csv) else torchcompile_csv
     if flashinfer_csv is not None:
         flashinfer_csv = os.path.join(bench_dir, flashinfer_csv) if not os.path.isabs(flashinfer_csv) else flashinfer_csv
     benchmark_names = {
@@ -36,12 +36,6 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv,
         print(f"Error: {e}. Make sure '{ours_csv}', '{flex_csv}', and '{flexnocache_csv}' are in the same directory.")
         sys.exit(1)
 
-    try:
-        torchcompile_df = pd.read_csv(torchcompile_csv)
-    except FileNotFoundError as e:
-        print(f"INFO: torch.compile data not found; skipping.")
-        torchcompile_df = pd.DataFrame(columns=ours_df.columns)
-
     ours_df = ours_df.rename(columns={"Implementation": "Benchmark"})
     ours_df["Implementation"] = "Flashlight"
 
@@ -54,6 +48,22 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv,
     flexnocache_df["Benchmark"] = flexnocache_df["Benchmark"].str.replace("flex_", "")
     flexnocache_df["Implementation"] = "Flex (Cache Miss)"
     # flexnocache_df["FW_Time_ms"] = flexnocache_df["FW_Time_ms"].replace(-1, float('nan'))
+
+    dfs_to_concat = [ours_df, flex_df, flexnocache_df]
+
+    if torchcompile_csv is not None:
+        try:
+            torchcompile_df = pd.read_csv(torchcompile_csv)
+        except FileNotFoundError as e:
+            print(f"Error: {e}. Make sure '{torchcompile_csv}' is in the same directory.")
+            sys.exit(1)
+    else:
+        torchcompile_df = pd.DataFrame(columns=ours_df.columns)
+
+    if not torchcompile_df.empty:
+        torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
+        torchcompile_df["Implementation"] = "torch.compile"
+        dfs_to_concat.append(torchcompile_df)
 
     # Optional: FlashInfer
     if flashinfer_csv is not None:
@@ -69,15 +79,6 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv,
         flashinfer_df = flashinfer_df.rename(columns={"Implementation": "Benchmark"})
         flashinfer_df["Benchmark"] = flashinfer_df["Benchmark"].str.replace("flashinfer_", "")
         flashinfer_df["Implementation"] = "FlashInfer"
-
-    if not torchcompile_df.empty:
-        torchcompile_df = torchcompile_df.rename(columns={"Implementation": "Benchmark"})
-        torchcompile_df["Implementation"] = "torch.compile"
-        dfs_to_concat = [ours_df, flex_df, flexnocache_df, torchcompile_df]
-    else:
-        dfs_to_concat = [ours_df, flex_df, flexnocache_df]
-
-    if not flashinfer_df.empty:
         dfs_to_concat.append(flashinfer_df)
 
     combined_df = pd.concat(dfs_to_concat, ignore_index=True)
@@ -102,102 +103,207 @@ def load_and_prepare_data(ours_csv, flex_csv, flexnocache_csv, torchcompile_csv,
     return combined_df, speedup_df, benchmarks
 
 
-def plot_line_charts(combined_df, speedup_df, benchmarks):
+def _format_benchmark_title(benchmark: str) -> str:
+    """Title case for subplot titles (matches bar plot / paper figures)."""
+    if benchmark in ("ALiBi", "Prefix LM"):
+        return benchmark
+    title = benchmark[0].upper() + benchmark[1:].lower()
+    title = " ".join(t[0].upper() + t[1:].lower() for t in title.split())
+    return title
+
+
+def plot_line_charts(combined_df, benchmarks, output_path: str = 'flex-able-torch.png'):
     """
     Generates and saves the line charts as in the original script.
+    Rows follow group_size (same as the bar plot): one row per attention grouping (e.g. MHA vs GQA).
+    Columns are benchmarks.
+
+    Visual style matches the paper line figure (e.g. flex-able-torch-h100.png): linear time axis,
+    no grid, legend above the grid, implementation-specific colors / dashes / markers.
     """
+    # Line aesthetics aligned with paper appendix figure (e.g. flex-able-torch-h100.png)
+    _LINE_IMPL_ORDER = [
+        "Flashlight",
+        "Flex (Cache Hit)",
+        "Flex (Cache Miss)",
+        "torch.compile",
+        "FlashInfer",
+    ]
+    _LINE_PALETTE = {
+        "Flashlight": "#1f77b4",
+        "Flex (Cache Hit)": "#ff7f0e",
+        "Flex (Cache Miss)": "#2ca02c",
+        "torch.compile": "#d62728",
+        "FlashInfer": "#9467bd",
+    }
+    _LINE_DASHES = {
+        "Flashlight": (),
+        "Flex (Cache Hit)": (4, 2),
+        "Flex (Cache Miss)": (1, 2),
+        "torch.compile": (3, 2, 1, 2),
+        "FlashInfer": (5, 2),
+    }
+    # All filled markers: seaborn forbids mixing filled (o, s) with line-art (x, +).
+    _LINE_MARKERS = {
+        "Flashlight": "o",
+        "Flex (Cache Hit)": "X",
+        "Flex (Cache Miss)": "s",
+        "torch.compile": "P",
+        "FlashInfer": "^",
+    }
+
+
+    def _mpl_linestyle(dash_tuple: tuple) -> str | tuple:
+        """Map seaborn-style dash tuples to a matplotlib linestyle."""
+        if dash_tuple is None or len(dash_tuple) == 0:
+            return "-"
+        return (0, dash_tuple)
+
+    def _batch_seqlen_sort_key(label) -> tuple:
+        inner = str(label).strip("()")
+        a, b = inner.split(",")
+        return (int(a.strip()), int(b.strip()))
+
     print("Generating line charts...")
-    # Combine the plots with a secondary y-axis for speedup
-    # This is a bit more complex with FacetGrid, so we'll iterate through the benchmarks
-    # fig, axes = plt.subplots(nrows=(len(benchmarks) + 2) // 3, ncols=3, figsize=(15, 5 * ((len(benchmarks) + 2) // 3)))
-    fig, axes = plt.subplots(nrows=2, ncols=4, figsize=(20, 10))
-    axes = axes.flatten()
+    sns.set_theme(style="white")
+    group_sizes = sorted(combined_df["group_size"].unique())
+    n_rows = len(group_sizes)
+    n_cols = len(benchmarks)
 
-    dashes_nhead_headdim = {"(32, 64)": (3, 2), "(16, 128)": (1, 1), "(16, 64)": ()}
+    fig, axes = plt.subplots(
+        nrows=n_rows,
+        ncols=n_cols,
+        figsize=(5 * n_cols, 5 * n_rows),
+        squeeze=False,
+    )
+    fig.set_size_inches(17, max(7, 3.5 * n_rows))
 
-    ax2_shared = None # Initialize a shared y-axis for speedup
-    legend_handles, legend_labels = [], []
-    for i, benchmark in enumerate(benchmarks):
-        ax1 = axes[i]
+    for row_idx, group_size in enumerate(group_sizes):
+        for col_idx, benchmark in enumerate(benchmarks):
+            ax1 = axes[row_idx, col_idx]
 
-        benchmark_data = combined_df[combined_df["Benchmark"] == benchmark]
-        if benchmark_data.empty:
-            ax1.set_title(benchmark)
-            ax1.text(0.5, 0.5, "No data", horizontalalignment='center', verticalalignment='center', transform=ax1.transAxes, color='gray')
-            ax1.set_xticks([])
-            ax1.set_yticks([])
-            continue
+            benchmark_data = combined_df[
+                (combined_df["Benchmark"] == benchmark)
+                & (combined_df["group_size"] == group_size)
+            ]
+            if benchmark_data.empty:
+                ax1.set_title(_format_benchmark_title(benchmark))
+                ax1.text(
+                    0.5,
+                    0.5,
+                    "No data",
+                    horizontalalignment="center",
+                    verticalalignment="center",
+                    transform=ax1.transAxes,
+                    color="gray",
+                )
+                ax1.set_xticks([])
+                ax1.set_yticks([])
+                continue
 
-        # Plot FW_Time_ms on the left y-axis
-        sns.lineplot(
-            data=benchmark_data,
-            x="batch_seqlen",
-            y="FW_Time_ms",
-            hue="Implementation",
-            style="nheads_headdim",
-            markers=True,
-            ax=ax1,
-            palette={"Flashlight": "blue", "Flex (Cache Hit)": "green", "Flex (Cache Miss)": "orange", "torch.compile": "red", "FlashInfer": "purple"},
-            dashes=dashes_nhead_headdim,
-        )
-        ax1.set_xlabel("(Batch Size, Sequence Length)")
-        ax1.set_ylabel("Time (ms)")
-        ax1.set_yscale("log", base=2) # Set y-axis to log2 scale
-        ax1.yaxis.set_major_formatter(ScalarFormatter())
-        ax1.yaxis.set_minor_formatter(ScalarFormatter())
-        ax1.set_title(benchmark)
-        # ax1.tick_params(axis='x', rotation=30)
+            hq = benchmark_data["nheads"].unique()
+            hkv = benchmark_data["nheads_kv"].unique()
+            assert len(hq) == 1 and len(hkv) == 1, (hq, hkv)
 
-
-        # Create a secondary y-axis for Speedup, sharing the y-axis with the first one
-        if ax2_shared is None:
-            ax2_shared = ax1.twinx()
-        ax2 = ax1.twinx() if i == 0 else ax1.twinx()
-        ax2.sharey(ax2_shared)
-
-        speedup_data = speedup_df[speedup_df["Benchmark"] == benchmark]
-        if not speedup_data.empty:
-            sns.lineplot(
-                data=speedup_data,
-                x="batch_seqlen",
-                y="Speedup",
-                style="nheads_headdim",
-                dashes=dashes_nhead_headdim,
-                ax=ax2,
-                # color="red",
-                # legend=False # No separate legend for this line
+            impl_present = [k for k in _LINE_IMPL_ORDER if k in benchmark_data["Implementation"].values]
+            x_order = sorted(benchmark_data["batch_seqlen"].unique(), key=_batch_seqlen_sort_key)
+            plot_df = benchmark_data.copy()
+            plot_df["batch_seqlen"] = pd.Categorical(
+                plot_df["batch_seqlen"], categories=x_order, ordered=True
             )
-        ax2.set_ylabel("Speedup")
+            palette = {k: _LINE_PALETTE[k] for k in impl_present}
+            dashes = {k: _LINE_DASHES[k] for k in impl_present}
+            markers = {k: _LINE_MARKERS[k] for k in impl_present}
 
-        # Only create the custom legend once
-        if i == 0:
-            speedup_handle = Line2D([], [], linestyle='-', marker='', label='Speedup (right axis)')
-            handles1, labels1 = ax1.get_legend_handles_labels()
-            legend_handles = handles1[1:3] + [speedup_handle] + handles1[3:]
-            legend_labels = labels1[1:3] + [speedup_handle.get_label()] + ["(#heads, headdim)"] + labels1[4:]
+            sns.lineplot(
+                data=plot_df,
+                x="batch_seqlen",
+                y="FW_Time_ms",
+                hue="Implementation",
+                style="Implementation",
+                hue_order=impl_present,
+                style_order=impl_present,
+                markers=markers,
+                dashes=dashes,
+                ax=ax1,
+                palette=palette,
+                linewidth=1.6,
+                markersize=5.5,
+            )
+            ax1.set_xlabel("")
+            if col_idx == 0:
+                label = "MHA" if hq[0] == 16 and hkv[0] == 16 else "GQA"
+                ax1.set_ylabel(f"Time (ms) for {label}", fontsize=12)
+            else:
+                ax1.yaxis.get_label().set_visible(False)
+            ax1.tick_params(
+                axis="x",
+                rotation=90,
+                labelsize=11,
+                direction="out",
+                length=4,
+                width=0.8,
+                bottom=True,
+                top=False,
+            )
+            ax1.tick_params(
+                axis="y",
+                labelsize=11,
+                direction="out",
+                length=4,
+                width=0.8,
+                left=True,
+                right=False,
+            )
+            ax1.grid(False)
+            ax1.set_facecolor("white")
+            ax1.set_title(_format_benchmark_title(benchmark), fontsize=12)
 
-        # Remove individual legends
-        ax1.get_legend().remove()
-        ax2.get_legend().remove()
+            ax1.get_legend().remove()
 
-    # Hide unused axes
-    for j in range(len(benchmarks), len(axes)):
-        axes[j].set_visible(False)
+    # Full-dataset legend: the first subplot may omit an implementation (e.g. no cache-miss row there).
+    impls_legend = [k for k in _LINE_IMPL_ORDER if k in combined_df["Implementation"].unique()]
+    legend_handles = [
+        Line2D(
+            [],
+            [],
+            color=_LINE_PALETTE[k],
+            linestyle=_mpl_linestyle(_LINE_DASHES[k]),
+            marker=_LINE_MARKERS[k],
+            markersize=5.5,
+            linewidth=1.6,
+            label=k.replace("Flex (Cache Hit)", "FlexAttention (Cache Hit)").replace(
+            "Flex (Cache Miss)", "FlexAttention (Cache Miss)")
+        )
+        for k in impls_legend
+    ]
+    legend_labels = [str(h.get_label()) for h in legend_handles]
 
-    assert legend_handles # Only if we actually plotted something
-    # Create a single legend for all subplots
-    fig.legend(legend_handles, legend_labels, loc='upper center', bbox_to_anchor=(0.5, .05), ncol=2)
+    ncol = max(1, len(legend_handles))
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=ncol,
+            frameon=True,
+            fontsize=10,
+        )
 
-    plt.suptitle("Flex-able Benchmarks (Line Plot)", y=1.02)
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.20 if legend_handles else 0.1) # Make more room for legend
+    # Extra bottom margin: rotated x tick labels sit below axes; supxlabel sits in the strip below them.
+    plt.subplots_adjust(
+        top=0.90 if legend_handles else 0.94,
+        bottom=0.16,
+    )
+    fig.supxlabel("(Batch Size, Sequence Length)", fontsize=11, y=-0.02)
 
-    output_filename = 'flex-able.png'
-    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Line plot saved to '{output_filename}'")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"Line plot saved to '{output_path}'")
 
 
-def plot_bar_charts(combined_df, speedup_df, benchmarks):
+def plot_bar_charts(combined_df, speedup_df, benchmarks, output_path: str = 'flex-able-bar.png'):
     """
     Generates and saves bar charts comparing implementations and showing speedup
     as text labels on the "Flashlight" bars.
@@ -347,10 +453,7 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
             else:
                 ax1.yaxis.get_label().set_visible(False)
             
-            title = benchmark[0].upper() + benchmark[1:].lower()
-            title = " ".join([t[0].upper() + t[1:].lower() for t in title.split(' ')])
-            if "Prefix Lm" == title:
-                title = "PrefixLM"
+            title = _format_benchmark_title(benchmark)
             ax1.set_title(f"{title}", fontsize=12)
             ax1.tick_params(
                 axis='x',
@@ -418,9 +521,8 @@ def plot_bar_charts(combined_df, speedup_df, benchmarks):
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.15 if handles1 else 0.1) # Adjust bottom for legend
 
-    output_filename = 'flex-able-bar.png'
-    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Bar plot saved to '{output_filename}'")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Bar plot saved to '{output_path}'")
 
 def main():
     import argparse
@@ -462,19 +564,32 @@ def main():
         default='results/all_flashinfer.csv',
         help="CSV file containing FlashInfer results. Default is 'results/all_flashinfer.csv'."
     )
-    args = parser.parse_args()
-
-    # Load and process data
-    combined_df, speedup_df, benchmarks = load_and_prepare_data(
-        args.flashlight, args.flex, args.flex_no_cache, args.torch_compile,
-        flashinfer_csv=args.flashinfer,
+    parser.add_argument(
+        '-o',
+        '--output',
+        type=str,
+        default=None,
+        metavar='PATH',
+        help="Output PNG path. Default: flex-able-torch.png (line) or flex-able-bar.png (bar), "
+        "relative to this script's directory unless PATH is absolute.",
     )
+    args = parser.parse_args()
 
     # Generate the chosen plot
     if args.plot == 'line':
-        plot_line_charts(combined_df, speedup_df, benchmarks)
+        combined_df, _, benchmarks = load_and_prepare_data(
+            args.flashlight, args.flex, args.flex_no_cache,
+            torchcompile_csv=args.torch_compile,
+            flashinfer_csv=args.flashinfer,
+        )
+        plot_line_charts(combined_df, benchmarks, args.output or 'flex-able-torch.png')
     elif args.plot == 'bar':
-        plot_bar_charts(combined_df, speedup_df, benchmarks)
+        combined_df, speedup_df, benchmarks = load_and_prepare_data(
+            args.flashlight, args.flex, args.flex_no_cache,
+            torchcompile_csv=None,
+            flashinfer_csv=args.flashinfer,
+        )
+        plot_bar_charts(combined_df, speedup_df, benchmarks, args.output or 'flex-able-bar.png')
 
 if __name__ == "__main__":
     main()

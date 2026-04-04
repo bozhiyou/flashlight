@@ -27,8 +27,7 @@ FLEX_SCRIPT   := run_flex_variants.py
 FLEX_CSVS     := results/all.csv \
                  results/all_flex.csv \
                  results/all_flexnocache.csv \
-                 results/all_flashinfer.csv \
-                 results/all_torchcompile.csv
+                 results/all_flashinfer.csv
 FLEX_PLOT     := plot_flex_variants.py
 
 results/all.csv:
@@ -97,28 +96,33 @@ data: $(FLEX_CSVS) $(CUSTOM_CSVS) $(VLLM_CSV)
 results/vllm_e2e_online.png: $(VLLM_CSV) $(VLLM_PLOT)
 	$(PYTHON) $(VLLM_PLOT) --csv $(VLLM_CSV) --output $@
 
-results/flex_variants.png: $(FLEX_CSVS) $(FLEX_PLOT)
+results/flex-able-bar.png: $(FLEX_CSVS) $(FLEX_PLOT)
 	$(PYTHON) $(FLEX_PLOT) --plot bar
 	mv flex-able-bar.png $@
 
-results/custom_variants.png: $(CUSTOM_CSVS) $(CUSTOM_PLOT)
+results/flex-able-torch.png: $(FLEX_CSVS) results/all_torchcompile.csv $(FLEX_PLOT)
+	$(PYTHON) $(FLEX_PLOT) --plot line
+	mv flex-able-torch.png $@
+
+results/flex-unable-bar.png: $(CUSTOM_CSVS) $(CUSTOM_PLOT)
 	$(PYTHON) $(CUSTOM_PLOT) \
 	  --diff-attn results/diff_attn.csv \
 	  --evo-attn results/evo_attn.csv
 	mv flex-unable-bar.png $@
 
-flex_variants: results/flex_variants.png
+flex_variants: results/flex-able-bar.png results/flex-able-torch.png
 
 vllm_e2e: results/vllm_e2e_online.png
 
-custom_variants: results/custom_variants.png
+custom_variants: results/flex-unable-bar.png
 
-figures: flex_variants vllm_e2e custom_variants
+figures: flex_variants custom_variants vllm_e2e
 	@echo "Figures generated successfully:"
-	@echo "	- results/flex_variants.png"
+	@echo "	- results/flex-able-bar.png"
+	@echo "	- results/flex-able-torch.png"
+	@echo "	- results/flex-unable-bar.png"
 	@echo "	- results/vllm_e2e_online.png"
-	@echo "	- results/custom_variants.png"
 
 # Generated outputs only; do not remove results/reference/
 clean:
-	rm -f $(FLEX_CSVS) $(CUSTOM_CSVS) $(VLLM_CSV) results/flex_variants.png results/vllm_e2e.png results/vllm_e2e_throughput.png results/custom_variants.png
+	rm -f $(FLEX_CSVS) $(CUSTOM_CSVS) $(VLLM_CSV) results/flex-able-bar.png results/vllm_e2e.png results/vllm_e2e_throughput.png results/flex-unable-bar.png
