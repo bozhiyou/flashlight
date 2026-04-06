@@ -48,23 +48,30 @@ results/all_torchcompile.csv:
 # ─── vLLM end-to-end inference ─────────────────────────────────────────────────
 
 VLLM_SCRIPT   := vllm_e2e_infer.py
-VLLM_CSV      := results/vllm_e2e_online.csv
+# The e2e runner writes two joined CSVs per run. Make tracks the summary
+# file as the build product; the per_request file is written alongside it.
+VLLM_CSV          := results/vllm_e2e_online_summary.csv
+VLLM_PER_REQ_CSV  := results/vllm_e2e_online_per_request.csv
 VLLM_PLOT     := plot_vllm_e2e.py
 
-VLLM_VARIANTS := alibi causal sliding_window
+# The four e2e variants (2x2 matrix: mask shape x score_mod). All sit on the
+# packed-doc substrate forced by vLLM's varlen layout.
+VLLM_VARIANTS := causal_packed sliding_window_packed causal_alibi_packed causal_softcap_packed
 
 vllm_e2e_synth:
 	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flashlight --variant $(v);)
 	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v);)
-	@# $(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache;)
 
 # ─── Mooncake trace-driven benchmark ──────────────────────────────────────────
 
 TRACE_DIR := /tmp/traces
 TRACE_URL := https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces
-TRACE_MAX_REQUESTS ?=  # 20
-TRACE_MAX_INPUT_LEN ?=  # 8192
-TRACE_ARGS :=  # --max-input-len $(TRACE_MAX_INPUT_LEN)  --max-requests $(TRACE_MAX_REQUESTS)
+TRACE_MAX_REQUESTS  ?= 200
+# Cap input length below vLLM's 32K chunked-prefill auto-enable threshold and
+# at/below the largest default bucket (32768). The e2e hook raises on Path B
+# (chunked prefill / paged K/V) so --max-input-len must stay under this.
+TRACE_MAX_INPUT_LEN ?= 16384
+TRACE_ARGS := --max-input-len $(TRACE_MAX_INPUT_LEN) --max-requests $(TRACE_MAX_REQUESTS) --online
 
 $(TRACE_DIR)/conversation_trace.jsonl:
 	mkdir -p $(TRACE_DIR)
@@ -72,10 +79,23 @@ $(TRACE_DIR)/conversation_trace.jsonl:
 
 traces: $(TRACE_DIR)/conversation_trace.jsonl
 
+# Trace-driven e2e data collection. Each invocation appends one row to
+# results/vllm_e2e_online_summary.csv and N rows to
+# results/vllm_e2e_online_per_request.csv (joined on the auto-generated
+# run_id). Order: Flashlight first (modifies inductor, needs cold start),
+# then FlexAttention, then baseline (unpatched flash-attn).
 $(VLLM_CSV): $(TRACE_DIR)/conversation_trace.jsonl
-	$(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flashlight --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
-	$(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
-	@# $(foreach v,$(VLLM_VARIANTS),VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 $(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --no-mask-cache --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
+	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flashlight --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
+	$(foreach v,$(VLLM_VARIANTS),$(PYTHON) $(VLLM_SCRIPT) --mode flex --variant $(v) --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS);)
+	$(PYTHON) $(VLLM_SCRIPT) --mode baseline --trace $(TRACE_DIR)/conversation_trace.jsonl $(TRACE_ARGS)
+
+# The per_request CSV is produced as a side-effect of the summary rule
+# above (one invocation of vllm_e2e_infer.py writes both files). Declared
+# here so downstream rules can list it as a prerequisite; the recipe just
+# asserts the side-effect happened. Switch to `&:` grouped targets if GNU
+# Make 4.3+ becomes the baseline.
+$(VLLM_PER_REQ_CSV): $(VLLM_CSV)
+	@test -f $@ || { echo "missing $@ (should be written alongside $<)"; exit 1; }
 
 # ─── Custom variants (DiffAttn, Evoformer) ───────────────────────────────────
 
@@ -93,8 +113,18 @@ data: $(FLEX_CSVS) $(CUSTOM_CSVS) $(VLLM_CSV)
 
 # Plot scripts write to CWD with hardcoded names; move into results/.
 
-results/vllm_e2e_online.png: $(VLLM_CSV) $(VLLM_PLOT)
-	$(PYTHON) $(VLLM_PLOT) --csv $(VLLM_CSV) --output $@
+# TODO: figures E1-E5 come from benchmarks/analyze_e2e.py, which reads the
+# summary + per_request CSV pair. Until that script lands, this target only
+# verifies the CSVs exist and leaves a placeholder PNG so the `figures` goal
+# still resolves.
+results/vllm_e2e_online.png: $(VLLM_CSV) $(VLLM_PER_REQ_CSV)
+	@echo "[vllm_e2e] TODO: plot_vllm_e2e.py needs updating for the"
+	@echo "          two-CSV schema ($(VLLM_CSV) + $(VLLM_PER_REQ_CSV))."
+	@echo "          Writing placeholder $@ so 'make figures' succeeds."
+	@touch $@
+# Phase 2 replacement (uncomment when the script is ready):
+# results/vllm_e2e_online.png: $(VLLM_CSV) $(VLLM_PER_REQ_CSV) $(VLLM_PLOT)
+# 	$(PYTHON) $(VLLM_PLOT) --summary $(VLLM_CSV) --per-request $(VLLM_PER_REQ_CSV) --output $@
 
 results/flex-able-bar.png: $(FLEX_CSVS) $(FLEX_PLOT)
 	$(PYTHON) $(FLEX_PLOT) --plot bar
@@ -125,4 +155,9 @@ figures: flex_variants custom_variants vllm_e2e
 
 # Generated outputs only; do not remove results/reference/
 clean:
-	rm -f $(FLEX_CSVS) $(CUSTOM_CSVS) $(VLLM_CSV) results/flex-able-bar.png results/vllm_e2e.png results/vllm_e2e_throughput.png results/flex-unable-bar.png
+	rm -f $(FLEX_CSVS) $(CUSTOM_CSVS) \
+	      $(VLLM_CSV) $(VLLM_PER_REQ_CSV) \
+	      results/vllm_e2e_online.png results/vllm_e2e_online.csv \
+	      results/flex-able-bar.png results/flex-able-torch.png \
+	      results/vllm_e2e.png results/vllm_e2e_throughput.png \
+	      results/flex-unable-bar.png

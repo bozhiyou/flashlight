@@ -1,64 +1,55 @@
-"""End-to-end vLLM inference benchmark with custom attention variants.
+"""End-to-end vLLM inference benchmark for the e2e variant set.
 
-Integrates FlexAttention and Flashlight attention variants from
-``run_flex_variants.py`` into a real vLLM generation pipeline.  This provides
-a realistic, full-stack counterpart to the kernel-level microbenchmarks in
-``run_flex_variants.py``.
+Routes vLLM prefill through a FlexAttention or Flashlight backend via a
+single monkey-patch on ``vllm.vllm_flash_attn.flash_attn_varlen_func``.
+Decode continues to use the native flash-attn kvcache kernel, so TTFT
+captures the variant's prefill performance while ITL reflects standard
+paged-attention decode.
 
-Patching strategy
------------------
-vLLM on GPU uses the FLASH_ATTN backend by default (TORCH_SDPA is CPU-only
-in vLLM 0.6.x).  vLLM 0.6.x bundles its own flash-attn fork at
-``vllm.vllm_flash_attn`` (it does **not** use the standalone ``flash_attn``
-package).  We monkey-patch ``vllm.vllm_flash_attn.flash_attn_varlen_func``
-— the function vLLM calls during prefill — **before** importing
-``vllm.attention.backends.flash_attn`` so that its
-``from vllm.vllm_flash_attn import flash_attn_varlen_func`` picks up the
-hooked version.
+The four e2e variants (2×2 matrix of mask shape × score_mod, all packed
+onto vLLM's varlen document-masked substrate):
 
-Decode steps use ``flash_attn_with_kvcache`` which reads directly from the
-paged KV cache; reconstructing contiguous K/V from paged blocks would add
-overhead that does not reflect real usage, so decode is left unpatched and
-runs with the native flash-attn kernel.  TTFT therefore captures the
-variant's prefill performance while ITL reflects standard paged-attention
-decode.
+    - causal_packed          (control: triangular, identity)
+    - sliding_window_packed  (banded, identity)
+    - causal_alibi_packed    (triangular, linear score_mod)
+    - causal_softcap_packed  (triangular, non-linear score_mod)
 
-Usage examples
---------------
+Layout contract
+---------------
+Only Path A (full prefill, packed 3D varlen, Q/K/V shape ``(total, H, D)``,
+``cu_seqlens_q == cu_seqlens_k``) is supported. Chunked prefill and prefix
+caching are disabled on the vLLM side; the hook raises on Path B (4D paged
+K/V or non-empty ``block_table``) rather than silently falling back.
 
-Each invocation handles one mode + variant and sweeps over hardcoded
-batch_size × input_len × output_len configs.
+The hook pads ``total`` up to the next bucket in ``--bucket-sizes`` (default
+``1024,2048,4096,8192,16384,32768``) and extends ``cu_seqlens_q`` with a
+sentinel doc over the padding tail. This bounds the distinct compile
+shapes to ``|buckets|`` so ``torch.compile(dynamic=False)`` doesn't blow
+the dynamo cache.
 
-Baseline (unpatched vLLM, sweeps all configs)::
+Usage
+-----
 
-    python benchmarks/vllm_e2e_infer.py --mode baseline
+Baseline (unpatched vLLM, trace mode)::
 
-FlexAttention with causal mask (mask caching on by default)::
+    python benchmarks/vllm_e2e_infer.py --mode baseline \\
+        --trace benchmarks/traces/conversation_trace.jsonl --online \\
+        --max-requests 200 --max-input-len 16384
 
-    python benchmarks/vllm_e2e_infer.py --mode flex --variant causal
+FlexAttention, packed-causal variant::
 
-FlexAttention with sliding-window mask, caching disabled::
+    python benchmarks/vllm_e2e_infer.py --mode flex --variant causal_packed \\
+        --trace benchmarks/traces/conversation_trace.jsonl --online \\
+        --max-requests 200 --max-input-len 16384
 
-    python benchmarks/vllm_e2e_infer.py --mode flex --variant sliding_window --no-mask-cache
+Flashlight (packed variants via monkeypatch/fusion)::
 
-Flashlight-compiled causal attention::
-
-    python benchmarks/vllm_e2e_infer.py --mode flashlight --variant causal
-
-Single config (override defaults)::
-
-    python benchmarks/vllm_e2e_infer.py --mode baseline --batch-size 1 --input-len 4096 --output-len 128
+    python benchmarks/vllm_e2e_infer.py --mode flashlight --variant causal_packed ...
 
 Verify hooks reach the attention layer for a given model::
 
     python benchmarks/vllm_e2e_infer.py --mode debug
     python benchmarks/vllm_e2e_infer.py --mode debug --model meta-llama/Llama-3.2-1B
-
-Trace-driven mode (Mooncake JSONL trace with variable-length requests)::
-
-    python benchmarks/vllm_e2e_infer.py --mode flashlight --variant causal \
-        --trace benchmarks/traces/conversation_trace.jsonl \
-        --max-requests 50 --max-input-len 8192
 """
 
 from __future__ import annotations
@@ -82,29 +73,35 @@ for _p in (_BENCH_DIR, _REPO_ROOT):
         sys.path.insert(0, _p)
 
 # ---------------------------------------------------------------------------
-# Friendly variant name  →  registry key
+# E2e variant set
 # ---------------------------------------------------------------------------
-FLEX_VARIANT_MAP: Dict[str, str] = {
-    "causal": "flex_full_with_causal",
-    "sliding_window": "flex_full_with_sliding_window",
-    "prefix_lm": "flex_full_with_prefix_lm",
-    "document_mask": "flex_full_with_document_mask",
-    "full": "flex_full",
-    "alibi": "flex_full_with_alibi",
-    "softcap": "flex_full_with_softcap",
-}
+# The four rows of the 2×2 (mask shape × score_mod) matrix. Every variant sits
+# on top of the packed-doc substrate (attn_gym's `generate_doc_mask_mod`), hence
+# the `_packed` suffix — a reader grepping this CSV cannot mistake an e2e
+# number for a kernel-bench number.
+E2E_VARIANTS: List[str] = [
+    "causal_packed",           # control: triangular mask, identity score_mod
+    "sliding_window_packed",   # perturbs mask shape   (banded)
+    "causal_alibi_packed",     # perturbs score_mod    (linear)
+    "causal_softcap_packed",   # perturbs score_mod    (non-linear)
+]
 
-FLASHLIGHT_VARIANT_MAP: Dict[str, str] = {
-    "causal": "full_with_causal",
-    "sliding_window": "full_with_sliding_window",
-    "prefix_lm": "full_with_prefix_lm",
-    "document_mask": "full_with_document_mask",
-    "full": "full",
-    "alibi": "full_with_alibi",
-    "softcap": "full_with_softcap",
-}
+# Default bucket sizes. `dynamic=False` would otherwise recompile on every
+# distinct `padded_total`; bucketing caps the number of distinct shapes to at
+# most |buckets| regardless of trace length distribution.
+DEFAULT_BUCKET_SIZES: List[int] = [1024, 2048, 4096, 8192, 16384, 32768]
 
-ALL_VARIANTS = sorted(FLEX_VARIANT_MAP.keys())
+# Sliding-window configuration (Mistral-7B-v0.1 window size).
+SLIDING_WINDOW_SIZE: int = 256
+
+# Softcap value (Gemma-2).
+SOFTCAP_VALUE: int = 30
+
+# Minimum seqlen to intercept. Anything below this is a vLLM-internal call
+# (e.g. memory-profiling with seqlen=9) that the compiled kernel cannot handle
+# (Triton requires power-of-2 arange). Fall back to the original flash-attn
+# kernel for these calls — they don't affect benchmark results.
+_MIN_BENCH_SEQLEN: int = 256
 
 
 def _check_gqa_compat(model_id: str) -> None:
@@ -137,99 +134,306 @@ def _check_gqa_compat(model_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Attention monkey-patching  (hooks flash_attn, NOT SDPA)
+# E2e attention path: layout normalizer + pluggable backend
+# ---------------------------------------------------------------------------
+#
+# The hook is factored in two pieces so FlexAttention and Flashlight receive
+# byte-identical inputs:
+#
+#   1. `_pad_and_pack` — layout normalizer. Takes vLLM's packed varlen 3D
+#      `(total, H, D)` tensors, pads the token dimension to the next bucket,
+#      reshapes to `(1, H, padded_total, D)`, and extends `cu_seqlens_q` with
+#      a sentinel doc covering the padding tail.
+#
+#   2. Backend runner — a callable from the backend registry that takes
+#      `(q, k, v, offsets, padded_total)` and returns the attention output.
+#      Two backends:
+#
+#        - flex:       flex_attention(q, k, v, block_mask=doc_mask(...),
+#                                     score_mod=...) compiled with
+#                                     `dynamic=False`.
+#        - flashlight: @torch.compile(dynamic=False) plain-PyTorch packed
+#                      attention in attention_variants/packed/*.py with
+#                      monkeypatch/fusion loaded.
+#
+# Only Path A (full prefill, packed 3D varlen) is supported; Path B (chunked
+# prefill / prefix-cache hit, 4D paged KV) raises.
+
+
+def _next_bucket(n: int, buckets: List[int]) -> int:
+    """Round ``n`` up to the smallest bucket size >= ``n``."""
+    for b in buckets:
+        if b >= n:
+            return b
+    raise RuntimeError(
+        f"vllm_e2e_infer: total_tokens={n} exceeds largest bucket "
+        f"{buckets[-1]}. Increase --bucket-sizes or lower --max-input-len."
+    )
+
+
+def _pad_and_pack(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    bucket_sizes: List[int],
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]":
+    """Normalize vLLM's packed varlen layout for the e2e backends.
+
+    Input:  Q/K/V as packed ``(total, H, D)`` with cumulative
+            per-doc offsets ``cu_seqlens_q = [0, s1, s1+s2, ..., total]``.
+
+    Output: Q/K/V as ``(1, H, padded_total, D)`` where
+            ``padded_total = next_bucket(total)``, plus an ``offsets`` tensor
+            extended with a sentinel doc covering ``[total, padded_total)``.
+            The sentinel's doc_id never matches a real doc, so padding tokens
+            are zeroed out by the ``same_doc`` check in
+            ``generate_doc_mask_mod``.
+    """
+    total = q.shape[0]
+    padded_total = _next_bucket(total, bucket_sizes)
+    pad = padded_total - total
+
+    if pad > 0:
+        # F.pad for a 3D tensor takes (last_dim_left, last_dim_right,
+        # mid_dim_left, mid_dim_right, first_dim_left, first_dim_right).
+        # We pad the token dimension (dim 0) on the right.
+        q = torch.nn.functional.pad(q, (0, 0, 0, 0, 0, pad))
+        k = torch.nn.functional.pad(k, (0, 0, 0, 0, 0, pad))
+        v = torch.nn.functional.pad(v, (0, 0, 0, 0, 0, pad))
+
+    # (padded_total, H, D) -> (1, H, padded_total, D)  (zero-copy view)
+    q_bhsd = q.transpose(0, 1).unsqueeze(0).contiguous()
+    k_bhsd = k.transpose(0, 1).unsqueeze(0).contiguous()
+    v_bhsd = v.transpose(0, 1).unsqueeze(0).contiguous()
+
+    # Append one sentinel doc whose range is [total, padded_total).
+    # `cu_seqlens_q` already ends in `total`; we append `padded_total`.
+    # When pad==0 the sentinel is an empty doc (count 0) and is harmless.
+    sentinel = torch.tensor(
+        [padded_total], device=cu_seqlens_q.device, dtype=cu_seqlens_q.dtype,
+    )
+    offsets = torch.cat([cu_seqlens_q, sentinel])
+
+    return q_bhsd, k_bhsd, v_bhsd, offsets, total, padded_total
+
+
+def _build_e2e_flex_backend() -> Dict[str, Callable[..., Any]]:
+    """Build FlexAttention runners for the four packed e2e variants.
+
+    Each runner has the signature::
+
+        runner(q, k, v, offsets, padded_total) -> (output, block_mask_build_s)
+
+    where ``q/k/v`` are ``(1, H, padded_total, D)``, ``offsets`` includes the
+    sentinel doc, and ``output`` is ``(1, H_q, padded_total, D)``.
+    """
+    from torch.nn.attention.flex_attention import (
+        flex_attention, create_block_mask,
+    )
+    from attn_gym.masks import generate_sliding_window, generate_doc_mask_mod
+    from attn_gym.masks.document_mask import _offsets_to_doc_ids_tensor
+    from attn_gym.mods import generate_tanh_softcap
+
+    # Fresh compiled handle — do NOT reuse run_flex_variants' module-global
+    # compiled flex_attention, which is tuned for kernel-bench shapes.
+    _compiled_flex = torch.compile(flex_attention, dynamic=False)
+
+    # Inner mask mods operate on *per-doc local* indices (generate_doc_mask_mod
+    # subtracts the doc offset before calling the inner rule).
+    def _causal_inner(_b: Any, _h: Any, q_idx: Any, kv_idx: Any) -> Any:
+        return q_idx >= kv_idx
+
+    _sliding_inner = generate_sliding_window(SLIDING_WINDOW_SIZE)
+
+    # ALiBi's bias is relative distance within a document, so the score_mod
+    # must convert global q/kv indices to per-doc local indices via the
+    # captured (doc_id, offsets) tensors. Softcap is position-independent,
+    # so it doesn't need per-call rebinding.
+    _softcap = generate_tanh_softcap(SOFTCAP_VALUE, approx=False)
+
+    def _make_packed_alibi_score_mod(doc_id: torch.Tensor, offsets: torch.Tensor,
+                                     num_heads: int) -> Callable[..., Any]:
+        def alibi(score: Any, _b: Any, h: Any, q_idx: Any, kv_idx: Any) -> Any:
+            q_local = q_idx - offsets[doc_id[q_idx]]
+            kv_local = kv_idx - offsets[doc_id[kv_idx]]
+            scale = torch.exp2(-((h + 1) * 8.0 / num_heads))
+            return score + (kv_local - q_local) * scale
+        return alibi
+
+    def _make_runner(
+        inner_mask_mod: Callable[..., Any],
+        score_mod_builder: Optional[Callable[..., Callable[..., Any]]],
+    ) -> Callable[..., Any]:
+        def runner(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                   offsets: torch.Tensor, padded_total: int) -> Any:
+            doc_mask_mod = generate_doc_mask_mod(inner_mask_mod, offsets)
+
+            t0 = time.perf_counter()
+            block_mask = create_block_mask(
+                doc_mask_mod, B=1, H=1,
+                Q_LEN=padded_total, KV_LEN=padded_total,
+                device=str(q.device),
+            )
+            build_s = time.perf_counter() - t0
+
+            score_mod: Optional[Callable[..., Any]] = None
+            if score_mod_builder is not None:
+                doc_id = _offsets_to_doc_ids_tensor(offsets)
+                score_mod = score_mod_builder(doc_id, offsets, q.shape[1])
+
+            enable_gqa = q.shape[1] != k.shape[1]
+            out = _compiled_flex(
+                q, k, v,
+                block_mask=block_mask,
+                score_mod=score_mod,
+                enable_gqa=enable_gqa,
+            )
+            return out, build_s
+        return runner
+
+    return {
+        "causal_packed":         _make_runner(_causal_inner, None),
+        "sliding_window_packed": _make_runner(_sliding_inner, None),
+        "causal_alibi_packed":   _make_runner(
+            _causal_inner, _make_packed_alibi_score_mod,
+        ),
+        "causal_softcap_packed": _make_runner(
+            _causal_inner, lambda _doc_id, _offsets, _H: _softcap,
+        ),
+    }
+
+
+def _build_e2e_flashlight_backend() -> Dict[str, Callable[..., Any]]:
+    """Build Flashlight runners for the four packed e2e variants.
+
+    Each runner has the same signature as the flex backend::
+
+        runner(q, k, v, offsets, padded_total) -> (output, block_mask_build_s)
+
+    ``block_mask_build_s`` is always 0.0 — there is no BlockMask in the
+    Flashlight path (which is itself a finding for the paper).
+
+    Activation sequence:
+    1. Import ``monkeypatch/fusion`` patches (modifies TorchInductor).
+    2. Disable SFDP pattern matching so Dynamo doesn't replace the attention
+       subgraph with FlashAttention.
+    3. Enable ``max_autotune`` for best Triton kernel selection.
+    4. Import the four ``attention_variants/packed/*.py`` modules and wrap
+       each with ``torch.compile(dynamic=False)``.
+    """
+    # --- Flashlight activation ---
+    from monkeypatch.fusion import dependent_reduction_fusion  # noqa: F401
+    from monkeypatch.fusion import block_reduction  # noqa: F401
+    from monkeypatch.fusion import reduction_kernel_fusion  # noqa: F401
+    from monkeypatch import disable_flashattention_replacement
+    disable_flashattention_replacement()
+
+    import torch._inductor.config
+    torch._inductor.config.max_autotune = True
+
+    # --- Import packed variants ---
+    # Each packed variant is split into a mask builder (eager, data-dependent
+    # indexing) and a compiled attention function (fusible matmul→mask→softmax→matmul).
+    from attention_variants.packed import (
+        attention_packed_causal, build_packed_causal_mask,
+        attention_packed_sliding_window, build_packed_sliding_window_mask,
+        attention_packed_causal_alibi, build_packed_causal_alibi_mask_and_bias,
+        attention_packed_causal_softcap, build_packed_causal_softcap_mask,
+    )
+
+    from attn_gym.masks.document_mask import _offsets_to_doc_ids_tensor
+
+    # Compile the attention functions (NOT the mask builders — those stay eager
+    # because indirect indexing into doc_id/offsets trips block_reduction).
+    _compiled_causal = torch.compile(attention_packed_causal, dynamic=False)
+    _compiled_sliding = torch.compile(attention_packed_sliding_window, dynamic=False)
+    _compiled_alibi = torch.compile(attention_packed_causal_alibi, dynamic=False)
+    _compiled_softcap = torch.compile(attention_packed_causal_softcap, dynamic=False)
+
+    def _runner_causal(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                       offsets: torch.Tensor, padded_total: int) -> Any:
+        doc_id = _offsets_to_doc_ids_tensor(offsets)
+        mask = build_packed_causal_mask(doc_id, offsets, padded_total, q.device)
+        out = _compiled_causal(q, k, v, mask)
+        return out, 0.0
+
+    def _runner_sliding(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        offsets: torch.Tensor, padded_total: int) -> Any:
+        doc_id = _offsets_to_doc_ids_tensor(offsets)
+        mask = build_packed_sliding_window_mask(
+            doc_id, offsets, padded_total, q.device,
+            window_size=SLIDING_WINDOW_SIZE,
+        )
+        out = _compiled_sliding(q, k, v, mask)
+        return out, 0.0
+
+    def _runner_alibi(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                      offsets: torch.Tensor, padded_total: int) -> Any:
+        doc_id = _offsets_to_doc_ids_tensor(offsets)
+        mask, alibi_bias = build_packed_causal_alibi_mask_and_bias(
+            doc_id, offsets, padded_total, q.size(1), q.device, q.dtype,
+        )
+        out = _compiled_alibi(q, k, v, mask, alibi_bias)
+        return out, 0.0
+
+    def _runner_softcap(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        offsets: torch.Tensor, padded_total: int) -> Any:
+        doc_id = _offsets_to_doc_ids_tensor(offsets)
+        mask = build_packed_causal_softcap_mask(doc_id, offsets, padded_total, q.device)
+        out = _compiled_softcap(q, k, v, mask, softcap=float(SOFTCAP_VALUE))
+        return out, 0.0
+
+    return {
+        "causal_packed":         _runner_causal,
+        "sliding_window_packed": _runner_sliding,
+        "causal_alibi_packed":   _runner_alibi,
+        "causal_softcap_packed": _runner_softcap,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Attention monkey-patching (hooks flash_attn, NOT SDPA)
 # ---------------------------------------------------------------------------
 
-def _install_flash_attn_hook(
-    attn_fn: Callable[..., torch.Tensor],
-    mask_mod: Optional[Callable[..., Any]] = None,
+def _install_e2e_hook(
+    backend: Dict[str, Callable[..., Any]],
+    variant: str,
+    bucket_sizes: List[int],
+    stats: Dict[str, Any],
 ) -> None:
-    """Replace ``flash_attn_varlen_func`` with *attn_fn* for prefill.
+    """Replace ``flash_attn_varlen_func`` with an e2e-backend hook.
 
-    Must be called **before** ``from vllm import LLM`` so that vLLM's own
-    ``from vllm.vllm_flash_attn import flash_attn_varlen_func`` resolves to
-    the hook.
+    Must be called **before** ``from vllm import LLM`` so vLLM's own
+    ``from vllm.vllm_flash_attn import flash_attn_varlen_func`` resolves
+    to the hook. vLLM 0.6.x bundles its own flash-attn fork at
+    ``vllm.vllm_flash_attn``; we patch both the interface sub-module and
+    the package ``__init__`` so later re-imports bind to the hook.
 
-    vLLM 0.6.x bundles its own flash-attn fork at ``vllm.vllm_flash_attn``
-    and never imports the standalone ``flash_attn`` package.  We patch both
-    the interface sub-module and the package ``__init__`` so that any
-    ``from vllm.vllm_flash_attn import flash_attn_varlen_func`` executed
-    later (e.g. inside ``vllm.attention.backends.flash_attn``) picks up
-    the hooked version.
+    Only Path A (full-prefill packed varlen, Q/K/V 3D, cu_seqlens_q == cu_seqlens_k)
+    is supported. Path B (chunked prefill / prefix-cache hit, 4D paged K/V,
+    non-empty ``block_table``) raises — this is a config error, not a
+    silent fallback. Decode uses ``flash_attn_with_kvcache`` (different
+    function) and never reaches this hook.
 
-    Input formats handled
-    ---------------------
-    The hook converts whatever vLLM passes into dense ``(B, H, S, D)``
-    tensors before calling *attn_fn*.  Three input shapes are supported:
-
-    1. **Uniform-length packed** (synthetic benchmarks) — Q/K/V are 3-D
-       ``(total, heads, dim)`` with ``total == B * max_seqlen``.
-       Converted via zero-copy view reshape.
-    2. **Variable-length packed** (trace-driven workloads where the vLLM
-       scheduler batches multiple prefills) — Q/K/V are 3-D but
-       ``total != B * max_seqlen``.  Converted via pad-and-unpad.
-    3. **Paged KV cache** (chunked prefill, enabled by default for
-       ``max_model_len > 32 K``) — Q is 3-D packed, but K/V arrive as
-       the **entire paged cache** ``(num_blocks, block_size, heads, dim)``
-       together with a ``block_table`` in *kwargs*.  Contiguous K/V are
-       reconstructed by gathering pages via ``block_table``, following the
-       same principle as PyTorch's official ``PagedAttention`` wrapper in
-       ``attention-gym`` (``attn_gym.paged_attention``): neither
-       FlexAttention nor any compiled attention kernel receives raw paged
-       blocks — a translation layer always reconstructs dense tensors or
-       remaps indices first.
-
-    Decode steps use ``flash_attn_with_kvcache`` (a separate function),
-    so they never reach this hook.
+    Profiling probes with ``max_seqlen_q < _MIN_BENCH_SEQLEN`` delegate to
+    the original kernel and are counted as ``fallback_calls``.
     """
     try:
         import vllm.vllm_flash_attn as vfa
         import vllm.vllm_flash_attn.flash_attn_interface as fai
     except ImportError:
         raise RuntimeError(
-            "vllm with bundled vllm_flash_attn is required.  "
+            "vllm with bundled vllm_flash_attn is required. "
             "Install with:  pip install 'vllm>=0.6.4,<0.7.0'"
         )
 
     _orig = fai.flash_attn_varlen_func
-
-    # Minimum seqlen to intercept.  Anything below this is a vLLM-internal
-    # call (e.g. memory-profiling with seqlen=9) that the compiled kernel
-    # cannot handle (Triton requires power-of-2 arange).  Fall back to
-    # the original flash-attn kernel for these calls — they don't affect
-    # benchmark results.
-    _MIN_BENCH_SEQLEN = 256
-
-    def _reconstruct_paged_kv(
-        kv_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        batch_size: int,
-        max_seqlen_k: int,
-    ) -> torch.Tensor:
-        """Gather contiguous KV from a paged cache.
-
-        Args:
-            kv_cache: (num_blocks, block_size, num_kv_heads, head_dim)
-            block_table: (B, max_pages_per_seq)  — physical page indices
-            cu_seqlens_k: (B+1,) — cumulative KV lengths
-            batch_size: number of sequences
-            max_seqlen_k: max KV length in the batch
-
-        Returns:
-            (B, max_seqlen_k, num_kv_heads, head_dim) — zero-padded contiguous KV
-        """
-        block_size = kv_cache.shape[1]
-        nheads_k = kv_cache.shape[2]
-        headdim = kv_cache.shape[3]
-        out = kv_cache.new_zeros(batch_size, max_seqlen_k, nheads_k, headdim)
-        for i in range(batch_size):
-            sk = cu_seqlens_k[i + 1] - cu_seqlens_k[i]
-            num_pages = (sk + block_size - 1) // block_size
-            pages = block_table[i, :num_pages]           # physical page indices
-            kv_pages = kv_cache[pages]                    # (num_pages, block_size, H, D)
-            out[i, :sk] = kv_pages.reshape(-1, nheads_k, headdim)[:sk]
-        return out
+    if variant not in backend:
+        raise KeyError(
+            f"Variant {variant!r} not in backend registry {sorted(backend)}"
+        )
+    runner = backend[variant]
 
     def _hooked(
         q: torch.Tensor,
@@ -246,9 +450,11 @@ def _install_flash_attn_hook(
     ) -> Any:
         batch_size = cu_seqlens_q.shape[0] - 1
         total_q = q.shape[0]
+        block_table = kwargs.get("block_table")
 
-        # Fall back to the original kernel for profiling / tiny-seqlen calls
+        # Profiling / tiny-seqlen calls — delegate to native kernel.
         if batch_size == 0 or max_seqlen_q < _MIN_BENCH_SEQLEN:
+            stats["fallback_calls"] += 1
             return _orig(
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k,
@@ -256,165 +462,111 @@ def _install_flash_attn_hook(
                 causal=causal, **kwargs,
             )
 
+        # Path B (chunked prefill / prefix-cache) — config error, fail loud.
+        if block_table is not None and block_table.numel() > 0:
+            raise RuntimeError(
+                "e2e hook received a Path-B call (non-empty block_table). "
+                "Set enable_chunked_prefill=False and enable_prefix_caching=False "
+                "on LLM(...), and cap --max-input-len below vLLM's chunked-prefill "
+                "auto-enable threshold."
+            )
+        if k.ndim == 4:
+            raise RuntimeError(
+                "e2e hook received 4D K (paged cache) — Path B not supported."
+            )
+        if cu_seqlens_q.shape != cu_seqlens_k.shape or not torch.equal(
+            cu_seqlens_q, cu_seqlens_k,
+        ):
+            raise RuntimeError(
+                "e2e hook expects full-prefill Path A "
+                "(cu_seqlens_q == cu_seqlens_k)."
+            )
+
         nheads_q, headdim = q.shape[1], q.shape[2]
-        block_table = kwargs.get("block_table")
-        paged = k.ndim == 4 and block_table is not None
 
-        # ── Q: always 3D (total_q, nheads_q, headdim) ──────────────────
-        uniform_q = (total_q == batch_size * max_seqlen_q)
-        if uniform_q:
-            q_4d = q.view(batch_size, max_seqlen_q, nheads_q, headdim) \
-                    .transpose(1, 2).contiguous()
-        else:
-            q_4d = q.new_zeros(batch_size, max_seqlen_q, nheads_q, headdim)
-            for i in range(batch_size):
-                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
-                q_4d[i, :sq] = q[cu_seqlens_q[i]:cu_seqlens_q[i + 1]]
-            q_4d = q_4d.transpose(1, 2).contiguous()  # (B, H, S, D)
+        t_call = time.perf_counter()
+        q_bhsd, k_bhsd, v_bhsd, offsets, _total, padded_total = _pad_and_pack(
+            q, k, v, cu_seqlens_q, bucket_sizes,
+        )
+        out, build_s = runner(q_bhsd, k_bhsd, v_bhsd, offsets, padded_total)
+        # Force compile / kernel completion before stopping the clock so the
+        # first-call compile cost is attributed to compile_time_s.
+        torch.cuda.synchronize()
+        call_elapsed = time.perf_counter() - t_call
 
-        # ── K/V: 3D packed  OR  4D paged cache ─────────────────────────
-        if paged:
-            # k/v: (num_blocks, block_size, num_kv_heads, head_dim)
-            # Reconstruct contiguous K/V via block_table
-            k_4d = _reconstruct_paged_kv(
-                k, block_table, cu_seqlens_k, batch_size, max_seqlen_k,
-            ).transpose(1, 2).contiguous()  # (B, H, S, D)
-            v_4d = _reconstruct_paged_kv(
-                v, block_table, cu_seqlens_k, batch_size, max_seqlen_k,
-            ).transpose(1, 2).contiguous()
-            nheads_k = k.shape[2]
-        else:
-            nheads_k = k.shape[1]
-            total_k = k.shape[0]
-            uniform_k = (total_k == batch_size * max_seqlen_k)
-            if uniform_q and uniform_k:
-                k_4d = k.view(batch_size, max_seqlen_k, nheads_k, headdim) \
-                        .transpose(1, 2).contiguous()
-                v_4d = v.view(batch_size, max_seqlen_k, nheads_k, headdim) \
-                        .transpose(1, 2).contiguous()
-            else:
-                k_4d = k.new_zeros(batch_size, max_seqlen_k, nheads_k, headdim)
-                v_4d = v.new_zeros(batch_size, max_seqlen_k, nheads_k, headdim)
-                for i in range(batch_size):
-                    sk = cu_seqlens_k[i + 1] - cu_seqlens_k[i]
-                    k_4d[i, :sk] = k[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
-                    v_4d[i, :sk] = v[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
-                k_4d = k_4d.transpose(1, 2).contiguous()  # (B, H, S, D)
-                v_4d = v_4d.transpose(1, 2).contiguous()
+        # flex_attention with enable_gqa=True returns 5D
+        # (B, H_kv, GQA_ratio, S, D) → merge to (B, H_q, S, D).
+        if out.ndim == 5:
+            out = out.reshape(1, nheads_q, padded_total, headdim)
 
-        # vLLM passes flash-attn-specific kwargs (window_size, causal,
-        # alibi_slopes, softcap) — we intentionally drop them because
-        # the variant supplies its own attention pattern via mask_mod /
-        # score_mod, just like benchmarks/run_flex_variants.py.
-        fn_kwargs: Dict[str, Any] = {}
-        if mask_mod is not None:
-            fn_kwargs["mask_mod"] = mask_mod
+        # (1, H_q, padded_total, D) → (padded_total, H_q, D) → slice padding
+        out_packed = out.squeeze(0).transpose(0, 1).contiguous()
+        out_packed = out_packed[:total_q].contiguous()
 
-        # Detect GQA: when query has more heads than key/value,
-        # flex_attention requires enable_gqa=True.
-        if q_4d.shape[1] != k_4d.shape[1]:
-            fn_kwargs["enable_gqa"] = True
+        # First in-scope call absorbs compile cost.
+        if stats["prefill_calls"] == 0:
+            stats["compile_time_s"] = call_elapsed
+        stats["prefill_calls"] += 1
+        stats["block_mask_build_s"] += build_s
 
-        result = attn_fn(q_4d, k_4d, v_4d, **fn_kwargs)
-
-        # flex_attention with enable_gqa=True returns 5D:
-        # (B, nheads_k, GQA_ratio, S, D) → merge to (B, nheads_q, S, D)
-        if result.ndim == 5:
-            result = result.reshape(batch_size, nheads_q, -1, headdim)
-
-        # ── Flatten result back to (total_q, nheads_q, headdim) ────────
-        if uniform_q:
-            result_flat = result.transpose(1, 2).reshape(-1, nheads_q, headdim)
-        else:
-            result_bhsd = result.transpose(1, 2)  # (B, S, H, D)
-            result_flat = q.new_empty(total_q, nheads_q, headdim)
-            for i in range(batch_size):
-                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
-                result_flat[cu_seqlens_q[i]:cu_seqlens_q[i + 1]] = result_bhsd[i, :sq]
-
-        # vLLM passes a pre-allocated ``out`` buffer; write into it.
         out_buf = kwargs.get("out")
         if out_buf is not None:
-            out_buf.copy_(result_flat)
+            out_buf.copy_(out_packed)
             return out_buf
-        return result_flat
+        return out_packed
 
-    # Patch both the interface sub-module and the package __init__ so that
-    # ``from vllm.vllm_flash_attn import flash_attn_varlen_func`` (executed
-    # later by vllm.attention.backends.flash_attn) binds to the hook.
     fai.flash_attn_varlen_func = _hooked  # type: ignore[assignment]
     vfa.flash_attn_varlen_func = _hooked  # type: ignore[assignment]
 
 
-def apply_flex_patch(variant: str, mask_cache: bool, max_seq_len: int) -> None:
-    """Hook ``flash_attn_varlen_func`` to route prefill through a FlexAttention
-    variant.
+def _make_stats() -> Dict[str, Any]:
+    return {
+        "prefill_calls": 0,
+        "fallback_calls": 0,
+        "block_mask_build_s": 0.0,
+        "compile_time_s": 0.0,
+    }
 
-    Parameters
-    ----------
-    variant : str
-        Friendly variant name (e.g. ``"causal"``).
-    mask_cache : bool
-        When *True* the ``create_block_mask_cached`` LRU cache is active;
-        when *False* we swap it with the uncached ``create_block_mask`` so
-        every call rebuilds the block mask (useful for measuring mask-creation
-        overhead).
-    max_seq_len : int
-        Upper-bound sequence length used to pre-build the ``mask_mod`` (for
-        variants that derive document offsets from sequence length).
+
+def apply_flex_patch(variant: str, bucket_sizes: List[int]) -> Dict[str, Any]:
+    """Install the e2e FlexAttention hook for ``variant``.
+
+    Returns the mutable ``stats`` dict the hook writes into; the caller
+    reads it after the run to populate the summary CSV.
     """
-    import run_flex_variants as rv
-
-    flex_key = FLEX_VARIANT_MAP[variant]
-    flex_fn = rv.FLEX_ATTENTION_REGISTRY[flex_key]
-    mask_factory = rv.FLEX_MASK_REGISTRY.get(flex_key)
-
-    # Toggle mask caching at the *module* level so that the registry lambdas
-    # (which close over the module-global ``create_block_mask_cached``) see
-    # the change.
-    if not mask_cache:
-        rv.create_block_mask_cached = rv.create_block_mask  # type: ignore[assignment]
-    else:
-        try:
-            rv.create_block_mask_cached.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-    # Pre-build the mask_mod once so that the LRU cache can recognise the same
-    # function object across calls (closures like ``generate_sliding_window``
-    # would otherwise produce a new object each time).
-    _mask_mod: Optional[Callable[..., Any]] = None
-    if mask_factory is not None:
-        from _utils import Config
-        cfg = Config(1, max_seq_len, 1, 64, 1, 0.0)
-        _mask_mod = mask_factory(cfg)
-
-    _install_flash_attn_hook(flex_fn, _mask_mod)
+    if variant not in E2E_VARIANTS:
+        raise ValueError(
+            f"variant={variant!r} is not in the e2e variant set {E2E_VARIANTS}"
+        )
+    backend = _build_e2e_flex_backend()
+    stats = _make_stats()
+    _install_e2e_hook(backend, variant, bucket_sizes, stats)
     print(
-        f"[patch] flash_attn_varlen_func → FlexAttention variant={variant} "
-        f"(key={flex_key}), mask_cache={mask_cache}"
+        f"[patch] flash_attn_varlen_func → e2e FlexAttention variant={variant}, "
+        f"buckets={bucket_sizes}"
     )
+    return stats
 
 
-def apply_flashlight_patch(variant: str) -> None:
-    """Apply Flashlight compiler patches and hook ``flash_attn_varlen_func``
-    to route prefill through a Flashlight-compiled variant.
+def apply_flashlight_patch(variant: str, bucket_sizes: List[int]) -> Dict[str, Any]:
+    """Install the e2e Flashlight hook for ``variant``.
+
+    Loads ``monkeypatch/fusion`` patches, disables SFDP replacement, compiles
+    the packed variant from ``attention_variants/packed/``, and installs the
+    hook through the same ``_install_e2e_hook`` path as flex.
     """
-    from run_flex_variants import _torch_compile_attn
-
-    fl_registry = _torch_compile_attn(enable_flashlight=True)
-
-    # Disable inductor shape_padding (pad_mm): the cat ops it inserts to
-    # pad non-aligned BMM dimensions produce graph patterns that
-    # Flashlight's block reduction codegen cannot handle.  Flashlight does
-    # its own tiling, so the padding is unnecessary.
-    torch._inductor.config.shape_padding = False
-
-    fl_key = FLASHLIGHT_VARIANT_MAP[variant]
-    fl_fn = fl_registry[fl_key]
-
-    _install_flash_attn_hook(fl_fn, mask_mod=None)
-    print(f"[patch] flash_attn_varlen_func → Flashlight variant={variant} (key={fl_key})")
+    if variant not in E2E_VARIANTS:
+        raise ValueError(
+            f"variant={variant!r} is not in the e2e variant set {E2E_VARIANTS}"
+        )
+    backend = _build_e2e_flashlight_backend()
+    stats = _make_stats()
+    _install_e2e_hook(backend, variant, bucket_sizes, stats)
+    print(
+        f"[patch] flash_attn_varlen_func → e2e Flashlight variant={variant}, "
+        f"buckets={bucket_sizes}"
+    )
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -643,13 +795,75 @@ def run_benchmark(
 
 COMMON_INPUT_FIELDS = [
     "mode", "variant", "model", "batch_size", "input_len", "output_len",
-    "mask_cache", "prefix_caching",
 ]
 
 COMMON_OUTPUT_FIELDS = [
     "total_s", "ttft_s", "decode_s", "mean_itl_ms",
     "tokens_per_s", "num_output_tokens",
 ]
+
+# ---------------------------------------------------------------------------
+# E2e two-CSV schema (summary + per_request, joined on run_id)
+# ---------------------------------------------------------------------------
+
+E2E_SUMMARY_FIELDS: List[str] = [
+    "run_id", "mode", "variant", "model",
+    "trace", "num_requests", "max_input_len",
+    "mean_ttft_s", "p50_ttft_s", "p95_ttft_s", "p99_ttft_s",
+    "mean_itl_ms", "p50_itl_ms",
+    "total_s", "tput_tok_s",
+    "prefill_frac",
+    "block_mask_build_s", "compile_time_s",
+    "prefill_calls", "fallback_calls",
+]
+
+E2E_PER_REQUEST_FIELDS: List[str] = [
+    "run_id", "mode", "variant",
+    "request_idx", "input_length", "output_length",
+    "arrival_t_s", "ttft_s", "decode_s", "num_output_tokens",
+    "batch_size_at_prefill",
+]
+
+
+def _percentile(xs: List[float], p: float) -> float:
+    """Plain nearest-rank percentile; avoids a numpy dep in the hot path."""
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    k = max(0, min(len(s) - 1, int(round((p / 100.0) * (len(s) - 1)))))
+    return s[k]
+
+
+def _e2e_csv_paths(args: argparse.Namespace) -> "tuple[str, str]":
+    """Return (summary_csv_path, per_request_csv_path)."""
+    out_dir = os.path.join(_BENCH_DIR, "results")
+    os.makedirs(out_dir, exist_ok=True)
+    base = getattr(args, "output", None)
+    if base is None:
+        base = "vllm_e2e_online" if args.online else "vllm_e2e_offline"
+    return (
+        os.path.join(out_dir, f"{base}_summary.csv"),
+        os.path.join(out_dir, f"{base}_per_request.csv"),
+    )
+
+
+def _append_csv_row(path: str, row: Dict[str, Any], fields: List[str]) -> None:
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _append_csv_rows(path: str, rows: List[Dict[str, Any]], fields: List[str]) -> None:
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
 
 def _csv_setup(args: argparse.Namespace, csv_fields: List[str]) -> str:
     """Create results dir and return the CSV path, writing header if needed."""
@@ -727,6 +941,29 @@ class BaseTraceWorkload:
     def max_seq_len(self) -> int:
         return self._max_seq_len
 
+    def print_length_histogram(self, variant: str) -> None:
+        """Print p50/p95/p99 of trace input lengths and warn on null-result risk.
+
+        Sliding-window has trivially-equivalent output to causal when the
+        trace's contexts are shorter than ~2·window, because the window
+        covers the full causal triangle per doc. Surface this before any
+        timed iteration.
+        """
+        p50 = _percentile(list(map(float, self.input_lens)), 50)
+        p95 = _percentile(list(map(float, self.input_lens)), 95)
+        p99 = _percentile(list(map(float, self.input_lens)), 99)
+        print(
+            f"[trace] input_length distribution: "
+            f"p50={int(p50)}, p95={int(p95)}, p99={int(p99)}, "
+            f"min={min(self.input_lens)}, max={max(self.input_lens)}"
+        )
+        if variant == "sliding_window_packed" and p50 < 2 * SLIDING_WINDOW_SIZE:
+            print(
+                f"[trace] WARNING: sliding_window_packed (W={SLIDING_WINDOW_SIZE}) "
+                f"is numerically equivalent to causal_packed when p50 < {2 * SLIDING_WINDOW_SIZE}. "
+                f"Expect a null result on this trace."
+            )
+
     def _build_row(self, variant: str, metrics: Dict[str, Any]) -> Dict[str, Any]:
         import numpy as np
         return {
@@ -736,8 +973,6 @@ class BaseTraceWorkload:
             "batch_size": len(self.records),
             "input_len": int(np.median(self.input_lens)),
             "output_len": int(np.median(self.output_lens)),
-            "mask_cache": self.args.mask_cache,
-            "prefix_caching": self.args.enable_prefix_caching,
             **metrics,
             "trace": os.path.basename(self.args.trace),
             "num_requests": len(self.records),
@@ -816,7 +1051,7 @@ class OfflineTraceWorkload(BaseTraceWorkload):
         )
 
         print(f"\n[offline trace] mode={self.args.mode}, variant={variant}, "
-              f"requests={len(self.records)}, mask_cache={self.args.mask_cache}")
+              f"requests={len(self.records)}")
 
         metrics = run_benchmark(
             llm, prompts, self.output_lens,
@@ -865,9 +1100,8 @@ class OnlineTraceWorkload(BaseTraceWorkload):
 
     def run(self, llm: Any, variant: str, out_path: str) -> None:
         import time
-        import json
         from vllm import SamplingParams
-        
+
         vocab_size = len(llm.get_tokenizer())
         prompts = self.build_prompts_from_trace(
             input_lens=self.input_lens,
@@ -875,14 +1109,21 @@ class OnlineTraceWorkload(BaseTraceWorkload):
             hash_ids_list=self.hash_ids_list
         )
         engine = llm.llm_engine
-        
-        print(f"\n[online trace] mode={self.args.mode}, " + (
-              f"mask_cache={self.args.mask_cache}, " if self.args.mode == "flex" else "") +
-              f"variant={variant}, num_requests={len(self.records)}")
+
+        print(f"\n[online trace] mode={self.args.mode}, variant={variant}, "
+              f"num_requests={len(self.records)}")
 
         warmup = self.args.warmup
         repeats = self.args.repeats
         all_metrics = []
+        # Per-request records captured on the final timed iteration, used by
+        # the e2e two-CSV writer.
+        final_per_request: List[Dict[str, Any]] = []
+        final_ttfts: List[float] = []
+        final_itls: List[float] = []
+        final_total_s: float = 0.0
+        final_tput: float = 0.0
+        final_prefill_s: float = 0.0
 
         for r_idx in range(-warmup, repeats):
             is_warmup = r_idx < 0
@@ -968,6 +1209,10 @@ class OnlineTraceWorkload(BaseTraceWorkload):
             ttfts = []
             itls = []
             decode_times = []
+            # Capture per-request rows for this iteration. If this is the
+            # final timed iteration, they end up persisted by the e2e
+            # two-CSV writer at the end of `run`.
+            iter_per_request: List[Dict[str, Any]] = []
 
             for i in range(n_reqs):
                 req_id = f"r{r_idx}_req_{i}"
@@ -980,6 +1225,22 @@ class OnlineTraceWorkload(BaseTraceWorkload):
                     decode_times.append(decode_time)
                     if num_out > 1:
                         itls.append((decode_time / (num_out - 1)) * 1000.0)
+
+                    iter_per_request.append({
+                        "run_id": getattr(self.args, "run_id", ""),
+                        "mode": self.args.mode,
+                        "variant": variant,
+                        "request_idx": i,
+                        "input_length": self.input_lens[i],
+                        "output_length": self.output_lens[i],
+                        "arrival_t_s": arrival_times[req_id],
+                        "ttft_s": ttft,
+                        "decode_s": decode_time,
+                        "num_output_tokens": num_out,
+                        # Phase 2 will populate this from the scheduler's
+                        # batch at prefill time; Phase 1 leaves it blank.
+                        "batch_size_at_prefill": "",
+                    })
 
             mean_ttft = sum(ttfts) / len(ttfts) if ttfts else 0.0
             mean_itl = sum(itls) / len(itls) if itls else 0.0
@@ -1003,13 +1264,86 @@ class OnlineTraceWorkload(BaseTraceWorkload):
                 "tokens_per_s": tput,
                 "num_output_tokens": total_out_tokens / n_reqs,
             })
-            
-        # Average metrics across repeats
+            # Overwrite final_* each timed iteration so what survives is the
+            # last run's data.
+            final_per_request = iter_per_request
+            final_ttfts = ttfts
+            final_itls = itls
+            final_total_s = total_duration
+            final_tput = tput
+            final_prefill_s = sum(ttfts)
+
+        # Average aggregate metrics across timed repeats (used by the
+        # legacy single-CSV writer below).
         avg_metrics = {k: sum(m[k] for m in all_metrics) / repeats for k in all_metrics[0]}
-        
+
         row = self._build_row(variant, avg_metrics)
         _append_row(out_path, row, self.csv_fields)
         print(f"\nOnline trace complete. Results in: {out_path}")
+
+        # E2e two-CSV writer — uses the final timed iteration's per-request
+        # data plus the hook's `e2e_stats` (block_mask_build_s, compile_time_s,
+        # prefill_calls, fallback_calls). In baseline mode there is no hook
+        # and `args.e2e_stats` is None, so we still write the summary row
+        # with zero overhead columns so baseline / flex / flashlight rows
+        # can be compared on the same axes.
+        self._write_e2e_csvs(
+            variant=variant,
+            per_request=final_per_request,
+            ttfts=final_ttfts,
+            itls=final_itls,
+            total_s=final_total_s,
+            tput_tok_s=final_tput,
+            prefill_s=final_prefill_s,
+        )
+
+    def _write_e2e_csvs(
+        self,
+        variant: str,
+        per_request: List[Dict[str, Any]],
+        ttfts: List[float],
+        itls: List[float],
+        total_s: float,
+        tput_tok_s: float,
+        prefill_s: float,
+    ) -> None:
+        """Write `<output>_summary.csv` and `<output>_per_request.csv`.
+
+        Rows from the final timed iteration are appended; the header is
+        written only on first creation.
+        """
+        stats = getattr(self.args, "e2e_stats", None) or {}
+        summary_path, per_req_path = _e2e_csv_paths(self.args)
+
+        mean_ttft = sum(ttfts) / len(ttfts) if ttfts else 0.0
+        mean_itl = sum(itls) / len(itls) if itls else 0.0
+
+        summary_row = {
+            "run_id": getattr(self.args, "run_id", ""),
+            "mode": self.args.mode,
+            "variant": variant,
+            "model": self.args.model,
+            "trace": os.path.basename(self.args.trace),
+            "num_requests": len(self.records),
+            "max_input_len": self.args.max_input_len,
+            "mean_ttft_s": mean_ttft,
+            "p50_ttft_s": _percentile(ttfts, 50),
+            "p95_ttft_s": _percentile(ttfts, 95),
+            "p99_ttft_s": _percentile(ttfts, 99),
+            "mean_itl_ms": mean_itl,
+            "p50_itl_ms": _percentile(itls, 50),
+            "total_s": total_s,
+            "tput_tok_s": tput_tok_s,
+            "prefill_frac": (prefill_s / total_s) if total_s > 0 else 0.0,
+            "block_mask_build_s": stats.get("block_mask_build_s", 0.0),
+            "compile_time_s": stats.get("compile_time_s", 0.0),
+            "prefill_calls": stats.get("prefill_calls", 0),
+            "fallback_calls": stats.get("fallback_calls", 0),
+        }
+        _append_csv_row(summary_path, summary_row, E2E_SUMMARY_FIELDS)
+        _append_csv_rows(per_req_path, per_request, E2E_PER_REQUEST_FIELDS)
+        print(f"[e2e csv] summary     → {summary_path}")
+        print(f"[e2e csv] per_request → {per_req_path}  ({len(per_request)} rows)")
 
 
 class SyntheticWorkload:
@@ -1037,8 +1371,7 @@ class SyntheticWorkload:
         for i, (bs, il, ol) in enumerate(configs, 1):
             print(
                 f"\n[{i}/{len(configs)}] mode={self.args.mode}, variant={variant}, "
-                f"batch={bs}, input_len={il}, output_len={ol}, "
-                f"mask_cache={self.args.mask_cache}"
+                f"batch={bs}, input_len={il}, output_len={ol}"
             )
 
             prompts = synthesize_prompts(bs, il, vocab_size=vocab_size)
@@ -1061,8 +1394,6 @@ class SyntheticWorkload:
                 "batch_size": bs,
                 "input_len": il,
                 "output_len": ol,
-                "mask_cache": self.args.mask_cache,
-                "prefix_caching": self.args.enable_prefix_caching,
                 **metrics,
             }
             _append_row(out_path, row, self.csv_fields)
@@ -1080,6 +1411,22 @@ def main(args: argparse.Namespace) -> None:
         run_debug(args)
         return
 
+    # ── Resolve bucket sizes and validate --max-input-len ───────────────
+    bucket_sizes = _parse_bucket_sizes(args.bucket_sizes)
+    args.bucket_sizes_list = bucket_sizes
+    if args.max_input_len is not None and args.max_input_len > bucket_sizes[-1]:
+        raise ValueError(
+            f"--max-input-len={args.max_input_len} exceeds the largest "
+            f"bucket {bucket_sizes[-1]}. Raise --bucket-sizes or lower "
+            f"--max-input-len."
+        )
+
+    # ── Resolve run_id ──────────────────────────────────────────────────
+    if getattr(args, "run_id", None) is None:
+        import uuid
+        args.run_id = uuid.uuid4().hex[:12]
+    print(f"[run] run_id={args.run_id}")
+
     # ── Determine max_seq_len (needed for patches and LLM init) ─────────
     use_trace = args.trace is not None
     if use_trace:
@@ -1087,9 +1434,13 @@ def main(args: argparse.Namespace) -> None:
             workload = OnlineTraceWorkload(args)
         else:
             workload = OfflineTraceWorkload(args)
+        # Print trace length histogram + sliding-window null-result warning
+        # before we spend time on LLM init / compile.
+        variant_for_warn = args.variant if args.mode != "baseline" else "baseline"
+        workload.print_length_histogram(variant_for_warn)
     else:
         workload = SyntheticWorkload(args)
-        
+
     max_seq_len = workload.max_seq_len
 
     # ── Validate model GQA ratio for FlexAttention ──────────────────────
@@ -1097,14 +1448,12 @@ def main(args: argparse.Namespace) -> None:
         _check_gqa_compat(args.model)
 
     # ── Apply attention patches (before vLLM import) ─────────────────────
+    stats: Optional[Dict[str, Any]] = None
     if args.mode == "flex":
-        apply_flex_patch(
-            args.variant,
-            mask_cache=args.mask_cache,
-            max_seq_len=max_seq_len,
-        )
+        stats = apply_flex_patch(args.variant, bucket_sizes)
     elif args.mode == "flashlight":
-        apply_flashlight_patch(args.variant)
+        stats = apply_flashlight_patch(args.variant, bucket_sizes)
+    args.e2e_stats = stats
 
     # ── Load model via vLLM (once for all configs) ───────────────────────
     from vllm import LLM
@@ -1116,17 +1465,20 @@ def main(args: argparse.Namespace) -> None:
         enforce_eager=args.enforce_eager,
         max_model_len=max_seq_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
-        enable_prefix_caching=args.enable_prefix_caching,
+        # Path A only: no chunked prefill, no prefix-cache hits. The e2e
+        # hook raises on Path B so config mistakes surface immediately.
+        enable_chunked_prefill=False,
+        enable_prefix_caching=False,
     )
 
-    # Unlimit dynamo compilation cache.  Must be set AFTER vLLM import
-    # because vllm/worker/model_runner.py hardcodes both limits to 128
-    # at module import time.  With dynamic=False each unique sequence
-    # length triggers a new compilation; the low default causes eager
-    # fallback which materializes full attention matrices → OOM.
+    # Cap dynamo compilation cache. Must be set AFTER vLLM import because
+    # vllm/worker/model_runner.py hardcodes the limits at module import
+    # time. With dynamic=False + bucket padding, the shape count is
+    # bounded by |bucket_sizes|, so a modest limit (1024) is plenty; we
+    # don't need the old 10000 value.
     import torch._dynamo.config
-    torch._dynamo.config.cache_size_limit = 10000
-    torch._dynamo.config.accumulated_cache_size_limit = 100000
+    torch._dynamo.config.cache_size_limit = 1024
+    torch._dynamo.config.accumulated_cache_size_limit = 1024
 
     out_path = _csv_setup(args, workload.csv_fields)
     variant = args.variant if args.mode != "baseline" else "n/a"
@@ -1134,9 +1486,23 @@ def main(args: argparse.Namespace) -> None:
     workload.run(llm, variant, out_path)
 
 
+def _parse_bucket_sizes(s: "str | List[int]") -> List[int]:
+    """Parse ``--bucket-sizes`` into a sorted list of ints."""
+    if isinstance(s, list):
+        parsed = [int(x) for x in s]
+    else:
+        parsed = [int(x) for x in str(s).split(",") if x.strip()]
+    if not parsed:
+        raise ValueError("--bucket-sizes must not be empty")
+    return sorted(parsed)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="End-to-end vLLM inference benchmark with custom attention variants.",
+        description="End-to-end vLLM inference benchmark for the 4 e2e packed "
+                    "variants (causal / sliding_window / causal_alibi / "
+                    "causal_softcap) through a FlexAttention or Flashlight "
+                    "backend.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -1147,20 +1513,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--variant",
-        choices=ALL_VARIANTS,
-        default="causal",
-        help="Attention variant (ignored in baseline/debug mode).",
+        choices=E2E_VARIANTS,
+        default="causal_packed",
+        help="E2e attention variant (ignored in baseline/debug mode).",
     )
     parser.add_argument(
         "--model",
         default="Qwen/Qwen2.5-3B",  # meta-llama/Llama-3.2-1B is gated
         help="HuggingFace model ID.",
-    )
-    parser.add_argument(
-        "--mask-cache",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="(flex mode) Enable/disable block-mask caching.",
     )
     parser.add_argument("--warmup", type=int, default=2,
                         help="Warmup iterations.")
@@ -1177,10 +1537,15 @@ if __name__ == "__main__":
         help="Fraction of GPU memory for vLLM.",
     )
     parser.add_argument(
-        "--enable-prefix-caching",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable prefix caching in vLLM.",
+        "--run-id", default=None,
+        help="Join key for summary/per-request CSVs (default: new UUID).",
+    )
+    parser.add_argument(
+        "--bucket-sizes",
+        default=",".join(str(b) for b in DEFAULT_BUCKET_SIZES),
+        help="Comma-separated padded_total bucket sizes for the e2e hook. "
+             "`dynamic=False` compiles once per unique bucket; keeping this "
+             "set small bounds the compile count.",
     )
     parser.add_argument(
         "--output", default=None,
