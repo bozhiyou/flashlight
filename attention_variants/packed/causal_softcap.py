@@ -1,25 +1,13 @@
 """Packed-doc causal + softcap attention for the Flashlight e2e backend.
 
 Same split as ``causal.py``: mask built eagerly, attention compiled.
+Reuses ``build_packed_causal_mask`` from ``causal.py`` (identical logic).
 """
 import math
 
 import torch
 
-
-def build_packed_causal_mask(
-    doc_id: torch.Tensor,
-    offsets: torch.Tensor,
-    S: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Build ``(S, S)`` bool mask (True = mask out) for packed-doc causal."""
-    idx = torch.arange(S, device=device)
-    same_doc = doc_id[idx[:, None]] == doc_id[idx[None, :]]
-    q_local = idx[:, None] - offsets[doc_id[idx[:, None]]]
-    kv_local = idx[None, :] - offsets[doc_id[idx[None, :]]]
-    causal = q_local >= kv_local
-    return ~(same_doc & causal)
+from .causal import build_packed_causal_mask  # noqa: F401 — re-exported
 
 
 def attention_packed_causal_softcap(

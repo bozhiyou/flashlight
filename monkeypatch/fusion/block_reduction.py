@@ -283,8 +283,25 @@ def codegen_node_schedule_with_kernel(self: TritonScheduling, node_schedule, ker
     def current_reduction_nodes(nodes):
         return itertools.takewhile(lambda n: n is not DisableReduction, nodes)
 
-    fusion_log.debug(f"codegen for {node_schedule}")
+    def _describe(n):
+        if n is EnableReduction:
+            return "EnableReduction"
+        if n is DisableReduction:
+            return "DisableReduction"
+        data = getattr(n.node, 'data', n.node) if hasattr(n, 'node') else n
+        ir_type = type(data).__name__
+        hint = f" hint={n.block_hint}" if getattr(n, 'block_hint', None) else ""
+        return f"{n.get_name()}({ir_type}{hint})"
+
+    fusion_log.debug(
+        "\ncodegen_node_schedule_with_kernel: [%s]",
+        ", ".join(_describe(n) for n in node_schedule),
+    )
     with kernel:
+        if not hasattr(kernel, 'one_shot_range'):
+            setattr(kernel, 'one_shot_range', getattr(self, 'one_shot_range', {}))
+        one_shot_range = getattr(kernel, 'one_shot_range')
+
         stack = contextlib.ExitStack()
         kernel.set_last_usage(current_reduction_nodes(node_schedule))
         all_indexing = {}
@@ -298,8 +315,8 @@ def codegen_node_schedule_with_kernel(self: TritonScheduling, node_schedule, ker
             else:
                 with kernel.set_current_node(node):
                     node.decide_inplace_update()
-                    index_vars = kernel.split_and_set_ranges(node.get_ranges({}))
-                    assert len(index_vars) == len(node.get_ranges({}))
+                    index_vars = kernel.split_and_set_ranges(node.get_ranges(one_shot_range))
+                    assert len(index_vars) == len(node.get_ranges(one_shot_range))
                     all_indexing.update(
                         dict.fromkeys(
                             indexing for indexing in node._body.indexing_from_args(index_vars).values()
@@ -319,7 +336,7 @@ def codegen_node_schedule_with_kernel(self: TritonScheduling, node_schedule, ker
                 with kernel.set_current_node(node):
                     # TODO - use split ranges ?
                     indexing_dtype_strength_reduction(node._body)
-                    index_vars = kernel.split_and_set_ranges(node.get_ranges({}))
+                    index_vars = kernel.split_and_set_ranges(node.get_ranges(one_shot_range))
                     node.codegen(index_vars)
 
 
@@ -660,7 +677,14 @@ def finalize_indexing(self: TritonKernel, indices: Sequence[sympy.Expr]):
     """
     for tree in self.range_trees:
         setattr(tree, 'block_meta', RangeTreeExt(tree))
-    fusion_log.debug("-"*18)
+    fusion_log.debug(
+        "finalize_indexing: %s",
+        " | ".join(
+            f"{tree.prefix}-tree [{', '.join(f'{r.var_list}={r.block}' for r in meta.ranges)}]"
+            for tree in self.range_trees
+            if (meta := getattr(tree, 'block_meta', None))
+        ),
+    )
 
 @monkey.patch(TritonKernel)
 def triton_tensor_ndim(self: TritonKernel) -> int:

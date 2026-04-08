@@ -997,6 +997,10 @@ class ReductionDependency:
                 n.get_name() for n in node1.get_nodes() if n.is_reduction()
             )
         anc_names = anc_reds & dep_ops
+        fusion_log.debug(
+            "  capture(%s, %s): dep_ops=%s anc_reds=%s anc_names=%s",
+            node1.get_name(), node2.get_name(), dep_ops, anc_reds, anc_names,
+        )
         # assert anc_names == dep_ops
         anc_nodes = [node1.scheduler.name_to_node[name] for name in anc_names]
         for anc_node in anc_nodes:
@@ -1371,5 +1375,8 @@ def fuse(self: CUDACombinedScheduling,
     return FusedSchedulerNode.fuse(node1, node2)
 
 
-# Setting this to a magic number for Alibi to prevent early materialization
+# Raise Inductor materialization thresholds to prevent early realization of
+# intermediates in attention patterns (e.g. exp(score - max) in causal+ALiBi
+# has num_reads=5 due to mask + local_pos buffer reads).
 torch._inductor.config.realize_opcount_threshold = 27
+torch._inductor.config.realize_reads_threshold = 8

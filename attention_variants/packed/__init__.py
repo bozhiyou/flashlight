@@ -20,7 +20,7 @@ from .sliding_window import (
 )
 from .causal_alibi import (
     attention_packed_causal_alibi,
-    build_packed_causal_alibi_mask_and_bias,
+    build_packed_causal_alibi_mask,
 )
 from .causal_softcap import attention_packed_causal_softcap
 from .causal_softcap import build_packed_causal_mask as build_packed_causal_softcap_mask
@@ -31,7 +31,7 @@ __all__ = [
     "attention_packed_sliding_window",
     "build_packed_sliding_window_mask",
     "attention_packed_causal_alibi",
-    "build_packed_causal_alibi_mask_and_bias",
+    "build_packed_causal_alibi_mask",
     "attention_packed_causal_softcap",
     "build_packed_causal_softcap_mask",
 ]

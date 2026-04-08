@@ -365,14 +365,14 @@ def generate_node_schedule(self: TritonScheduling, nodes, numel, rnumel):
     rnumels = [rnumel] if rnumel != 1 else []  # stack of reduction ranges
     EnableReduction.context = [rnumels]  # a log of rnumels history
 
-    # TODO @bozhiyou one shot range should be kernel level metadata
-    one_shot_range = {}
-    for n in itertools.chain(node.get_nodes() for node in nodes):
+    one_shot_range: dict[sympy.Integer, sympy.Integer] = {}
+    for n in itertools.chain.from_iterable(node.get_nodes() for node in nodes):
         for prefix, size in getattr(n, 'one_shot', {}).items():
             if prefix in one_shot_range:
                 assert size == one_shot_range[prefix], f"{prefix}: {size}/{one_shot_range[prefix]}"
                 continue
             one_shot_range[prefix] = size
+    setattr(self, 'one_shot_range', one_shot_range)
 
     def fits_in_main_body(n):
         """fits in kernel"""
@@ -388,6 +388,11 @@ def generate_node_schedule(self: TritonScheduling, nodes, numel, rnumel):
         nonlocal numel, rnumel, rnumels
 
         nlevels = requires_closing_previous_reduction(node)
+        if nlevels:
+            schedule_log.debug(
+                "  %s: close %d reduction level(s), rnumels %s -> %s",
+                n.get_name(), nlevels, rnumels, rnumels[:-nlevels] if nlevels < len(rnumels) else [],
+            )
         for _ in range(nlevels):
             # end_current_reduction_loop
             assert not (node_schedule and node_schedule[-1] in (EnableReduction, DisableReduction)), f"reduction enabled/disabled with noop {node_schedule}"
@@ -396,13 +401,26 @@ def generate_node_schedule(self: TritonScheduling, nodes, numel, rnumel):
             rnumels.pop()
 
         # TODO @bozhiyou EnableReduction/DisableReduction can be instances with ranges to avoid recomputation
-        ranges = n.get_ranges(one_shot_range)
+        ranges = n.get_ranges(getattr(self, 'one_shot_range', {}))
         (new_numels, *new_rnumels), _ = self.kernel_type._split_iteration_ranges([numel, *rnumels], ranges)#[[node_numel], [node_rnumel]])
         new_numel = sympy_product(new_numels)
         new_rnumels = list(rnumel for rnumel in itertools.chain.from_iterable(new_rnumels) if rnumel != 1)
         assert numel == new_numel, f"{new_numel} (expect {numel})"
+        schedule_log.debug(
+            "  %s: ranges=%s groups=[%s, %s] -> new_rnumels=%s (was %s)",
+            n.get_name(), ranges, numel, rnumels, new_rnumels, rnumels,
+        )
         if len(new_rnumels) > len(rnumels):
-            assert new_rnumels[:len(rnumels)] == rnumels, f"fits_outside_reduction: {rnumels} {new_rnumels}"
+            assert new_rnumels[:len(rnumels)] == rnumels, (
+                f"schedule_node_in_loop({n.get_name()}): node adds deeper reduction "
+                f"levels ({len(rnumels)} -> {len(new_rnumels)}), but existing rnumels "
+                f"are not a prefix of new rnumels.\n"
+                f"  existing rnumels: {rnumels}\n"
+                f"  new rnumels:      {new_rnumels}\n"
+                f"  prefix mismatch:  new_rnumels[:{len(rnumels)}] = "
+                f"{new_rnumels[:len(rnumels)]} != {rnumels}\n"
+                f"  node ranges:      {ranges}"
+            )
             for rnumel in new_rnumels[len(rnumels):]:
                 if rnumel != 1:  # TODO @bozhiyou and not persistent_reduction
                     node_schedule.append(EnableReduction)
@@ -410,7 +428,16 @@ def generate_node_schedule(self: TritonScheduling, nodes, numel, rnumel):
                     break  # mark once even for multiple levels
             EnableReduction.context.append(new_rnumels)
         elif len(new_rnumels) < len(rnumels):
-            assert rnumels[:len(new_rnumels)] == new_rnumels, f"fits_outside_reduction: {rnumels} {new_rnumels}"
+            assert rnumels[:len(new_rnumels)] == new_rnumels, (
+                f"schedule_node_in_loop({n.get_name()}): node removes reduction "
+                f"levels ({len(rnumels)} -> {len(new_rnumels)}), but new rnumels "
+                f"are not a prefix of existing rnumels.\n"
+                f"  existing rnumels: {rnumels}\n"
+                f"  new rnumels:      {new_rnumels}\n"
+                f"  prefix mismatch:  rnumels[:{len(new_rnumels)}] = "
+                f"{rnumels[:len(new_rnumels)]} != {new_rnumels}\n"
+                f"  node ranges:      {ranges}"
+            )
             for rnumel in reversed(rnumels[len(new_rnumels):]):
                 if rnumel != 1:  # TODO @bozhiyou and not persistent_reduction
                     node_schedule.append(DisableReduction)
@@ -418,7 +445,13 @@ def generate_node_schedule(self: TritonScheduling, nodes, numel, rnumel):
                     break  # mark once even for multiple levels
             EnableReduction.context.append(new_rnumels)
         else:
-            assert rnumels == new_rnumels, f"may need another reduction {rnumels} {new_rnumels}"
+            assert rnumels == new_rnumels, (
+                f"schedule_node_in_loop({n.get_name()}): same number of reduction "
+                f"levels but dims differ — may need another reduction boundary.\n"
+                f"  existing rnumels: {rnumels}\n"
+                f"  new rnumels:      {new_rnumels}\n"
+                f"  node ranges:      {ranges}"
+            )
         rnumels = new_rnumels
         rnumel = rnumels[-1] if len(rnumels) else 1
 
@@ -539,7 +572,9 @@ def create_kernel(self: TritonScheduling, kernel_type: type, nodes, *kernel_args
     # if kernel_args or kernel_kwargs:
     #     return node_schedule, _create_kernel(*kernel_args, **kernel_kwargs), _create_kernel
 
-    return node_schedule, _create_kernel()
+    kernel = _create_kernel()
+    setattr(kernel, 'one_shot_range', getattr(self, 'one_shot_range', {}))
+    return node_schedule, kernel
 
 
 
@@ -1001,12 +1036,12 @@ def codegen_body(self: TritonKernel):
 
 def lookup_one_shot_var(self: IterationRangesRoot, length: sympy.Integer):
     """
-    kernel/rangetree level one shot range
+    kernel/rangetree level one shot range.
+    Registers on the tree as {size: var}.
     """
     one_shot_ranges = getattr(self, 'one_shot', {})
     if length in one_shot_ranges:
         return one_shot_ranges[length]
-    # create new symbol
     var = sympy_index_symbol(f"{self.prefix}{next(self.kernel.iter_vars_count)}")
     node = IterationRangesEntry(
             var.name,
@@ -1021,7 +1056,7 @@ def lookup_one_shot_var(self: IterationRangesRoot, length: sympy.Integer):
     setattr(self, 'one_shot', one_shot_ranges)
 
     if not self.is_loop:
-        self.var_ranges[var] = length  # one-shot var does not introduce loop, but range needed for masking parallelism
+        self.var_ranges[var] = length
     fusion_log.debug(f"add {var}({length}) to tree {self.name}")
     return var
 
@@ -1078,7 +1113,14 @@ def split_and_set_ranges(self: TritonKernel, lengths: list[list[sympy.Expr]]):
     ):
         itervars = self.set_ranges(*lengths)
         handle_one_shot_ranges(self, itervars)
-        fusion_log.debug(f"{lengths} {itervars}")
+        fusion_log.debug(
+            "split_and_set_ranges [%s] %s: lengths=%s itervars=%s inside_reduction=%s",
+            "codegen" if any(hasattr(t, 'block_meta') for t in self.range_trees) else "indexing",
+            self.current_node.get_name(),
+            lengths,
+            itervars,
+            self.inside_reduction,
+        )
         return itervars
 
     # TODO @bozhiyou this is ad hoc to fix rnumel == 1; should be no_r_dim if rnumel == 1

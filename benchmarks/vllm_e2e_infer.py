@@ -338,7 +338,7 @@ def _build_e2e_flashlight_backend() -> Dict[str, Callable[..., Any]]:
     from attention_variants.packed import (
         attention_packed_causal, build_packed_causal_mask,
         attention_packed_sliding_window, build_packed_sliding_window_mask,
-        attention_packed_causal_alibi, build_packed_causal_alibi_mask_and_bias,
+        attention_packed_causal_alibi, build_packed_causal_alibi_mask,
         attention_packed_causal_softcap, build_packed_causal_softcap_mask,
     )
 
@@ -371,10 +371,10 @@ def _build_e2e_flashlight_backend() -> Dict[str, Callable[..., Any]]:
     def _runner_alibi(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                       offsets: torch.Tensor, padded_total: int) -> Any:
         doc_id = _offsets_to_doc_ids_tensor(offsets)
-        mask, alibi_bias = build_packed_causal_alibi_mask_and_bias(
-            doc_id, offsets, padded_total, q.size(1), q.device, q.dtype,
+        mask, local_pos = build_packed_causal_alibi_mask(
+            doc_id, offsets, padded_total, q.device,
         )
-        out = _compiled_alibi(q, k, v, mask, alibi_bias)
+        out = _compiled_alibi(q, k, v, mask, local_pos)
         return out, 0.0
 
     def _runner_softcap(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
