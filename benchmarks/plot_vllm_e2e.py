@@ -1,53 +1,28 @@
 """Plot vLLM end-to-end online-trace benchmark results.
 
-Input CSVs (produced by ``vllm_e2e_infer.py``):
+Input CSV (produced by ``vllm_e2e_infer.py``):
 
   **summary CSV** (``--summary``, default ``results/vllm_e2e_online_summary.csv``)
       One row per (mode, variant) run.  Aggregated metrics over all
-      requests: mean/p50/p95/p99 TTFT, throughput (tok/s), total wall
-      time, cumulative block-mask build time (FlexAttention only), and
-      ``torch.compile`` wall time.
+      requests: mean/p50/p95/p99 TTFT and ITL, throughput (tok/s), total
+      wall time, cumulative block-mask build time (FlexAttention only),
+      and ``torch.compile`` wall time.
 
-  **per-request CSV** (``--per-request``, default
-      ``results/vllm_e2e_online_per_request.csv``)
-      One row per individual request.  Records arrival time, TTFT, decode
-      time, output length, and (when available) batch size at prefill.
-      Used to build distributional plots that the summary cannot capture.
+Output figures (4 PNGs, each with 3 panels -- TTFT | ITL | Throughput):
 
-Output figure (2x2 panels):
+  - **mean**: Mean TTFT, Mean ITL, Throughput
+  - **p99**:  P99 TTFT,  P99 ITL,  Throughput
+  - **p95**:  P95 TTFT,  P95 ITL,  Throughput
+  - **p50**:  P50 TTFT,  P50 ITL,  Throughput
 
-  **(a) Mean TTFT** -- Time to First Token averaged over all requests
-      (lower is better).  Measures how quickly the first output token is
-      returned after a request arrives; dominated by the prefill pass,
-      which is where Flashlight patching takes effect.
-
-  **(b) Throughput** -- Total output tokens / total wall time (higher is
-      better).  End-to-end metric including both prefill and decode;
-      since decode is unpatched, differences stem from prefill efficiency
-      and scheduling overhead.
-
-  **(c) TTFT CDF** -- Cumulative Distribution Function of per-request
-      TTFT.  Each curve plots the fraction of requests (y-axis) whose
-      TTFT is at most x seconds.  Curves further *left* indicate lower
-      (better) latency.  Solid lines = Flashlight, dashed =
-      FlexAttention; colour = attention variant.
-
-  **(d) Compile overhead** -- Wall-clock time spent inside
-      ``torch.compile`` during the run (lower is better).  One-time
-      cold-start cost amortised across requests; measured via
-      ``time.perf_counter`` around the first compiled call that triggers
-      graph capture and code generation.
-
-Speedup labels on panels (a), (b), (d) show the Flashlight-over-
-FlexAttention ratio: a value **> 1 means Flashlight is better** (lower
-latency, higher throughput, or shorter compile time).
+Speedup labels show the Flashlight-over-FlexAttention ratio: a value
+**> 1 means Flashlight is better** (lower latency / higher throughput).
 
 Usage::
 
     python benchmarks/plot_vllm_e2e.py
     python benchmarks/plot_vllm_e2e.py \\
         --summary results/vllm_e2e_online_summary.csv \\
-        --per-request results/vllm_e2e_online_per_request.csv \\
         --output results/vllm_e2e_online.png
 """
 
@@ -58,7 +33,6 @@ import os
 import sys
 
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
@@ -189,103 +163,68 @@ def _bar_panel(
     ax.set_title(title, fontsize=11)
 
 
-# ── CDF panel ─────────────────────────────────────────────────────────────
+# ── Plot specs ────────────────────────────────────────────────────────────
 
-def _cdf_panel(
-    ax: plt.Axes, per_req: pd.DataFrame, variants: list[str],
-) -> None:
-    """Per-request TTFT cumulative distribution curves."""
-    for variant in variants:
-        color = VARIANT_COLORS.get(variant, "gray")
-        for mode in ("flashlight", "flex"):
-            sub = per_req[
-                (per_req["mode"] == mode) & (per_req["variant"] == variant)
-            ]
-            if sub.empty:
-                continue
-            ttft = np.sort(sub["ttft_s"].dropna().values)
-            cdf = np.arange(1, len(ttft) + 1) / len(ttft)
-            ax.plot(ttft, cdf, ls=MODE_LS[mode], color=color, lw=1.5)
-
-    ax.set_xlabel("TTFT (s)", fontsize=10)
-    ax.set_ylabel("CDF", fontsize=10)
-    ax.set_title("(c) TTFT Distribution", fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    # Compact legend: linestyle = mode, colour = variant
-    handles = [
-        Line2D([], [], color="gray", ls="-", lw=1.5, label="Flashlight"),
-        Line2D([], [], color="gray", ls="--", lw=1.5, label="FlexAttention"),
-    ]
-    for v in variants:
-        handles.append(
-            Line2D(
-                [], [],
-                color=VARIANT_COLORS.get(v, "gray"),
-                ls="-", lw=2.5,
-                label=VARIANT_DISPLAY.get(v, v).replace("\n", " "),
-            ),
-        )
-    ax.legend(handles=handles, fontsize=7, loc="lower right", ncol=2)
+PLOT_SPECS: list[tuple[str, str, str, str]] = [
+    # (suffix, ttft_col, itl_col, label_prefix)
+    ("mean", "mean_ttft_s", "mean_itl_ms", "Mean"),
+    ("p99",  "p99_ttft_s",  "p99_itl_ms",  "P99"),
+    ("p95",  "p95_ttft_s",  "p95_itl_ms",  "P95"),
+    ("p50",  "p50_ttft_s",  "p50_itl_ms",  "P50"),
+]
 
 
 # ── Main figure ────────────────────────────────────────────────────────────
 
-def plot_online(
-    summary: pd.DataFrame,
-    per_req: pd.DataFrame | None,
-    output: str,
-) -> None:
+def _output_path(base: str, suffix: str) -> str:
+    """Derive per-plot output path: ``base_suffix.ext``."""
+    root, ext = os.path.splitext(base)
+    return f"{root}_{suffix}{ext}"
+
+
+def plot_online(summary: pd.DataFrame, output: str) -> None:
     summary = summary[summary["mode"] != "baseline"].copy()
     variants = _variants(summary)
     if not variants:
         print("No recognised variants in data.", file=sys.stderr)
         return
 
-    ttft_col = "mean_ttft_s" if "mean_ttft_s" in summary.columns else "ttft_s"
     tput_col = "tput_tok_s" if "tput_tok_s" in summary.columns else "tokens_per_s"
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    for suffix, ttft_col, itl_col, label in PLOT_SPECS:
+        if ttft_col not in summary.columns or itl_col not in summary.columns:
+            print(f"Skipping {label} plot: missing {ttft_col} or {itl_col}",
+                  file=sys.stderr)
+            continue
 
-    # (a) Mean TTFT
-    _bar_panel(
-        axes[0, 0], summary, variants, ttft_col,
-        "Mean TTFT (s)", "(a) Time to First Token",
-    )
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
 
-    # (b) Throughput
-    _bar_panel(
-        axes[0, 1], summary, variants, tput_col,
-        "Throughput (tok/s)", "(b) Decoding Throughput",
-        higher_is_better=True,
-    )
-
-    # (c) Per-request TTFT CDF
-    if per_req is not None and not per_req.empty:
-        _cdf_panel(axes[1, 0], per_req, variants)
-    else:
-        fig.delaxes(axes[1, 0])
-
-    # (d) Compile overhead
-    if "compile_time_s" in summary.columns:
         _bar_panel(
-            axes[1, 1], summary, variants, "compile_time_s",
-            "Compile time (s)", "(d) Compilation Overhead",
+            axes[0], summary, variants, ttft_col,
+            f"{label} TTFT (s)", f"(a) {label} TTFT",
         )
-    else:
-        fig.delaxes(axes[1, 1])
+        _bar_panel(
+            axes[1], summary, variants, itl_col,
+            f"{label} ITL (ms)", f"(b) {label} ITL",
+        )
+        _bar_panel(
+            axes[2], summary, variants, tput_col,
+            "Throughput (tok/s)", "(c) Throughput",
+            higher_is_better=True,
+        )
 
-    # Shared bar-chart legend
-    fig.legend(
-        [Patch(facecolor=FL_COLOR, edgecolor="white"),
-         Patch(facecolor=FX_COLOR, edgecolor="white")],
-        ["Flashlight", "FlexAttention"],
-        loc="upper center", bbox_to_anchor=(0.5, 1.02),
-        ncol=2, fontsize=10,
-    )
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    plt.savefig(output, dpi=300, bbox_inches="tight")
-    print(f"Saved {output}")
+        fig.legend(
+            [Patch(facecolor=FL_COLOR, edgecolor="white"),
+             Patch(facecolor=FX_COLOR, edgecolor="white")],
+            ["Flashlight", "FlexAttention"],
+            loc="upper center", bbox_to_anchor=(0.5, 1.02),
+            ncol=2, fontsize=10,
+        )
+        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        path = _output_path(output, suffix)
+        plt.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved {path}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -300,26 +239,15 @@ def main() -> None:
         help="Summary CSV (one row per mode x variant run).",
     )
     parser.add_argument(
-        "--per-request", default="results/vllm_e2e_online_per_request.csv",
-        dest="per_request", help="Per-request CSV for CDF plots.",
-    )
-    parser.add_argument(
         "--output", "-o", default="results/vllm_e2e_online.png",
-        help="Output figure path.",
+        help="Output figure base path (suffixed per stat level).",
     )
     # Legacy single-CSV path (e.g. results/vllm_e2e_online.csv)
     parser.add_argument("--csv", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if args.csv:
-        summary = _load(args.csv)
-        per_req = None
-    else:
-        summary = _load(args.summary)
-        pr_path = _resolve(args.per_request)
-        per_req = pd.read_csv(pr_path) if os.path.exists(pr_path) else None
-
-    plot_online(summary, per_req, _resolve(args.output))
+    summary = _load(args.csv if args.csv else args.summary)
+    plot_online(summary, _resolve(args.output))
 
 
 if __name__ == "__main__":
